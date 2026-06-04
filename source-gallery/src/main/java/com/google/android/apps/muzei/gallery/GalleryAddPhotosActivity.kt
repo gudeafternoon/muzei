@@ -3,10 +3,11 @@ package com.google.android.apps.muzei.gallery
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.util.Log
+import androidx.activity.ComponentActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.app.ShareCompat
-import androidx.fragment.app.FragmentActivity
-import com.google.android.apps.muzei.util.coroutineScope
+import androidx.core.view.WindowCompat
+import androidx.lifecycle.lifecycleScope
 import com.google.android.apps.muzei.util.toast
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -16,7 +17,7 @@ import kotlinx.coroutines.launch
  * [android.content.Intent.ACTION_SEND_MULTIPLE] to add one or more
  * images to the Gallery
  */
-class GalleryAddPhotosActivity : FragmentActivity() {
+class GalleryAddPhotosActivity : ComponentActivity() {
 
     companion object {
         private const val TAG = "GalleryAddPhotos"
@@ -28,7 +29,8 @@ class GalleryAddPhotosActivity : FragmentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val intentReader = ShareCompat.IntentReader.from(this)
+        WindowCompat.enableEdgeToEdge(window)
+        val intentReader = ShareCompat.IntentReader(this)
         if (!intentReader.isShareIntent) {
             finish()
             return
@@ -43,7 +45,7 @@ class GalleryAddPhotosActivity : FragmentActivity() {
             }
             val chosenPhoto = ChosenPhoto(photoUri)
 
-            coroutineScope.launch(Dispatchers.Main) {
+            lifecycleScope.launch(Dispatchers.Main) {
                 val context = this@GalleryAddPhotosActivity
                 val id = GalleryDatabase.getInstance(context).chosenPhotoDao()
                         .insert(context, chosenPhoto, callingApplication)
@@ -63,6 +65,7 @@ class GalleryAddPhotosActivity : FragmentActivity() {
         return callingPackage?.run {
             return try {
                 val pm = packageManager
+                @Suppress("DEPRECATION")
                 pm.getApplicationLabel(pm.getApplicationInfo(callingPackage, 0)).toString()
             } catch (e: PackageManager.NameNotFoundException) {
                 Log.w(TAG, "Could not retrieve label for package $this", e)

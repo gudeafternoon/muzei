@@ -17,16 +17,22 @@
 apply plugin: 'com.android.library'
 
 android {
+    namespace 'com.google.android.apps.muzei.glwallpaper'
+    compileSdk libs.versions.compileSdk.get().toInteger()
 
-    compileSdkVersion rootProject.ext.compileSdkVersion
+    enableKotlin = false
 
     defaultConfig {
-        minSdkVersion 19
-        targetSdkVersion rootProject.ext.targetSdkVersion
+        minSdkVersion 23
+        targetSdkVersion libs.versions.targetSdk.get()
     }
 
     buildTypes {
         publicBeta
         publicDebug
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
     }
 }

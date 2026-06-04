@@ -18,19 +18,21 @@ package com.google.android.apps.muzei
 
 import android.content.Context
 import android.content.Intent
-import android.os.Bundle
-import androidx.core.os.bundleOf
-import androidx.fragment.app.FragmentActivity
+import androidx.activity.ComponentActivity
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.withCreated
 import com.google.android.apps.muzei.room.MuzeiDatabase
 import com.google.android.apps.muzei.room.openArtworkInfo
-import com.google.android.apps.muzei.util.coroutineScope
+import com.google.firebase.Firebase
 import com.google.firebase.analytics.FirebaseAnalytics
+import com.google.firebase.analytics.analytics
+import com.google.firebase.analytics.logEvent
 import kotlinx.coroutines.launch
 
 /**
  * Open the Artwork Info associated with the current artwork
  */
-class ArtworkInfoRedirectActivity : FragmentActivity() {
+class ArtworkInfoRedirectActivity : ComponentActivity() {
     companion object {
         private const val EXTRA_FROM = "from"
 
@@ -41,17 +43,19 @@ class ArtworkInfoRedirectActivity : FragmentActivity() {
                 }
     }
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        coroutineScope.launch {
-            val artwork = MuzeiDatabase.getInstance(this@ArtworkInfoRedirectActivity)
+    init {
+        lifecycleScope.launch {
+            val database = withCreated {
+                MuzeiDatabase.getInstance(this@ArtworkInfoRedirectActivity)
+            }
+            val artwork = database
                     .artworkDao()
                     .getCurrentArtwork()
             artwork?.run {
                 val from = intent?.getStringExtra(EXTRA_FROM) ?: "activity_shortcut"
-                FirebaseAnalytics.getInstance(this@ArtworkInfoRedirectActivity).logEvent(
-                        "artwork_info_open", bundleOf(
-                        FirebaseAnalytics.Param.CONTENT_TYPE to from))
+                Firebase.analytics.logEvent("artwork_info_open") {
+                    param(FirebaseAnalytics.Param.CONTENT_TYPE, from)
+                }
                 openArtworkInfo(this@ArtworkInfoRedirectActivity)
             }
             finish()

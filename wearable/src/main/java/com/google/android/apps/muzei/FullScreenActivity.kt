@@ -17,64 +17,57 @@
 package com.google.android.apps.muzei
 
 import android.os.Bundle
-import android.view.View
+import androidx.activity.ComponentActivity
 import androidx.core.view.isVisible
-import androidx.fragment.app.FragmentActivity
-import androidx.wear.ambient.AmbientModeSupport
+import androidx.lifecycle.lifecycleScope
+import androidx.wear.ambient.AmbientLifecycleObserver
 import com.google.android.apps.muzei.render.ImageLoader
 import com.google.android.apps.muzei.room.MuzeiDatabase
-import com.google.android.apps.muzei.util.PanView
-import com.google.android.apps.muzei.util.coroutineScope
-import com.google.android.apps.muzei.util.observeNonNull
-import com.google.firebase.analytics.FirebaseAnalytics
+import com.google.android.apps.muzei.room.contentUri
+import com.google.android.apps.muzei.util.collectIn
+import com.google.firebase.Firebase
+import com.google.firebase.analytics.analytics
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 import net.nurik.roman.muzei.BuildConfig
-import net.nurik.roman.muzei.R
+import net.nurik.roman.muzei.databinding.FullScreenActivityBinding
 
-class FullScreenActivity : FragmentActivity(),
-        AmbientModeSupport.AmbientCallbackProvider {
-    private val ambientCallback: AmbientModeSupport.AmbientCallback =
-            object : AmbientModeSupport.AmbientCallback() {
-                override fun onEnterAmbient(ambientDetails: Bundle?) {
+class FullScreenActivity : ComponentActivity() {
+    private val ambientCallback: AmbientLifecycleObserver.AmbientLifecycleCallback =
+            object : AmbientLifecycleObserver.AmbientLifecycleCallback {
+                override fun onEnterAmbient(ambientDetails: AmbientLifecycleObserver.AmbientDetails) {
                     finish()
                 }
             }
+    private val ambientObserver = AmbientLifecycleObserver(this, ambientCallback)
 
-    private lateinit var panView: PanView
-    private lateinit var loadingIndicatorView: View
+    private lateinit var binding: FullScreenActivityBinding
 
     private var showLoadingIndicator: Job? = null
 
     public override fun onCreate(savedState: Bundle?) {
         super.onCreate(savedState)
-        AmbientModeSupport.attach(this)
-        setContentView(R.layout.full_screen_activity)
-        FirebaseAnalytics.getInstance(this).setUserProperty("device_type", BuildConfig.DEVICE_TYPE)
-        panView = findViewById(R.id.pan_view)
+        lifecycle.addObserver(ambientObserver)
+        binding = FullScreenActivityBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+        Firebase.analytics.setUserProperty("device_type", BuildConfig.DEVICE_TYPE)
 
-        loadingIndicatorView = findViewById(R.id.loading_indicator)
-        showLoadingIndicator = coroutineScope.launch(Dispatchers.Main) {
+        showLoadingIndicator = lifecycleScope.launch(Dispatchers.Main) {
             delay(500)
-            loadingIndicatorView.isVisible = true
+            binding.loadingIndicator.isVisible = true
         }
 
-        MuzeiDatabase.getInstance(this).artworkDao()
-                .currentArtwork.observeNonNull(this) { artwork ->
-            coroutineScope.launch(Dispatchers.Main) {
-                val image = ImageLoader.decode(
-                        contentResolver, artwork.contentUri)
-                showLoadingIndicator?.cancel()
-                loadingIndicatorView.isVisible = false
-                panView.isVisible = true
-                panView.setImage(image)
-            }
+        val database = MuzeiDatabase.getInstance(this@FullScreenActivity)
+        database.artworkDao().getCurrentArtworkFlow().filterNotNull().collectIn(this) { artwork ->
+            val image = ImageLoader.decode(
+                    contentResolver, artwork.contentUri)
+            showLoadingIndicator?.cancel()
+            binding.loadingIndicator.isVisible = false
+            binding.panView.isVisible = true
+            binding.panView.setImage(image)
         }
-    }
-
-    override fun getAmbientCallback(): AmbientModeSupport.AmbientCallback {
-        return ambientCallback
     }
 }

@@ -24,6 +24,7 @@ import android.database.Cursor
 import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 import java.io.File
@@ -69,9 +70,9 @@ class GalleryProvider : ContentProvider() {
                 filename.append(digest.joinToString(separator = "") {
                     it.toInt().and(0xff).toString(16).padStart(2, '0')
                 })
-            } catch (e: NoSuchAlgorithmException) {
+            } catch (_: NoSuchAlgorithmException) {
                 filename.append(uri.toString().hashCode())
-            } catch (e: UnsupportedEncodingException) {
+            } catch (_: UnsupportedEncodingException) {
                 filename.append(uri.toString().hashCode())
             }
 
@@ -83,11 +84,11 @@ class GalleryProvider : ContentProvider() {
         throw UnsupportedOperationException("Deletes are not supported")
     }
 
-    override fun getType(uri: Uri): String? {
+    override fun getType(uri: Uri): String {
         return "vnd.android.cursor.item/vnd.google.android.apps.muzei.gallery.chosen_photos"
     }
 
-    override fun insert(uri: Uri, values: ContentValues?): Uri? {
+    override fun insert(uri: Uri, values: ContentValues?): Uri {
         throw UnsupportedOperationException("Inserts are not supported")
     }
 
@@ -101,16 +102,15 @@ class GalleryProvider : ContentProvider() {
             selection: String?,
             selectionArgs: Array<String>?,
             sortOrder: String?
-    ): Cursor? {
+    ): Cursor {
         throw UnsupportedOperationException("Queries are not supported")
     }
 
+    @OptIn(DelicateCoroutinesApi::class)
     @Throws(FileNotFoundException::class)
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor? {
         val context: Context = context ?: return null
-        if (mode != "r") {
-            throw IllegalArgumentException("Only reading chosen photos is allowed")
-        }
+        require(mode == "r") { "Only reading chosen photos is allowed" }
         val id = ContentUris.parseId(uri)
         val chosenPhoto = GalleryDatabase.getInstance(context).chosenPhotoDao()
                 .chosenPhotoBlocking(id) ?: throw FileNotFoundException("Unable to load $uri")

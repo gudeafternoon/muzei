@@ -16,6 +16,7 @@
 
 package com.google.android.apps.muzei.gallery
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.ContentProviderOperation
 import android.content.ContentUris
@@ -27,10 +28,8 @@ import android.os.Build
 import android.provider.BaseColumns
 import android.provider.DocumentsContract
 import android.provider.MediaStore
-import android.text.TextUtils
 import android.text.format.DateUtils
 import android.util.Log
-import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
 import androidx.exifinterface.media.ExifInterface
 import androidx.work.CoroutineWorker
@@ -44,13 +43,14 @@ import com.google.android.apps.muzei.api.provider.ProviderClient
 import com.google.android.apps.muzei.api.provider.ProviderContract
 import com.google.android.apps.muzei.gallery.BuildConfig.GALLERY_ART_AUTHORITY
 import com.google.android.apps.muzei.util.getString
-import kotlinx.coroutines.GlobalScope
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
+import java.io.FileNotFoundException
 import java.io.IOException
 import java.text.ParseException
 import java.text.SimpleDateFormat
 import java.util.LinkedList
-import java.util.Random
+import kotlin.random.Random
 
 class GalleryScanWorker(
         context: Context,
@@ -65,8 +65,8 @@ class GalleryScanWorker(
         private val EXIF_DATE_FORMAT = SimpleDateFormat("yyyy:MM:dd HH:mm:ss")
         private val OMIT_COUNTRY_CODES = hashSetOf("US")
 
-        fun enqueueInitialScan(ids: List<Long>) {
-            val workManager = WorkManager.getInstance()
+        fun enqueueInitialScan(context: Context, ids: List<Long>) {
+            val workManager = WorkManager.getInstance(context)
             workManager.enqueue(ids.map { id ->
                 OneTimeWorkRequestBuilder<GalleryScanWorker>()
                         .addTag(INITIAL_SCAN_TAG)
@@ -75,8 +75,8 @@ class GalleryScanWorker(
             })
         }
 
-        fun enqueueRescan() {
-            val workManager = WorkManager.getInstance()
+        fun enqueueRescan(context: Context) {
+            val workManager = WorkManager.getInstance(context)
             workManager.enqueueUniqueWork("rescan",
                     ExistingWorkPolicy.REPLACE,
                     OneTimeWorkRequestBuilder<GalleryScanWorker>()
@@ -125,7 +125,7 @@ class GalleryScanWorker(
     }
 
     private suspend fun scanChosenPhoto(providerClient: ProviderClient, chosenPhoto: ChosenPhoto) {
-        if (chosenPhoto.isTreeUri && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+        if (chosenPhoto.isTreeUri) {
             addTreeUri(providerClient, chosenPhoto)
         } else {
             val cachedFile = GalleryProvider.getCacheFileForUri(
@@ -157,10 +157,12 @@ class GalleryScanWorker(
         } catch (e: SecurityException) {
             Log.w(TAG, "Unable to access image from $imageUri, deleting row", e)
             deleteChosenPhoto(chosenPhoto)
+        } catch (e: Exception) {
+            // Could be anything: NullPointerException, IllegalArgumentException, etc.
+            Log.i(TAG, "Unable to load images from $imageUri", e)
         }
     }
 
-    @RequiresApi(Build.VERSION_CODES.LOLLIPOP)
     private suspend fun addTreeUri(providerClient: ProviderClient, chosenPhoto: ChosenPhoto) {
         val treeUri = chosenPhoto.uri
         val allImages = mutableListOf<Uri>()
@@ -201,19 +203,21 @@ class GalleryScanWorker(
         } catch (e: SecurityException) {
             Log.w(TAG, "Unable to load images from $treeUri, deleting row", e)
             deleteChosenPhoto(chosenPhoto)
+        } catch (e: FileNotFoundException) {
+            Log.w(TAG, "Unable to load images from $treeUri, deleting row", e)
+            deleteChosenPhoto(chosenPhoto)
+        } catch (e: Exception) {
+            // Could be anything: NullPointerException, IllegalArgumentException, etc.
+            Log.i(TAG, "Unable to load images from $treeUri", e)
         }
     }
 
-    private fun deleteChosenPhoto(chosenPhoto: ChosenPhoto) {
-        GlobalScope.launch {
-            GalleryDatabase.getInstance(applicationContext)
-                    .chosenPhotoDao()
-                    .delete(applicationContext, listOf(chosenPhoto.id))
-        }
+    private suspend fun deleteChosenPhoto(chosenPhoto: ChosenPhoto) = withContext(NonCancellable) {
+        GalleryDatabase.getInstance(applicationContext)
+                .chosenPhotoDao()
+                .delete(applicationContext, listOf(chosenPhoto.id))
     }
 
-    @SuppressLint("Recycle")
-    @RequiresApi(Build.VERSION_CODES.LOLLIPOP)
     private fun addAllImagesFromTree(
             images: MutableList<Uri>,
             treeUri: Uri
@@ -241,17 +245,18 @@ class GalleryScanWorker(
                         }
                     }
                 }
-            } catch (e: SecurityException) {
+            } catch (_: SecurityException) {
                 // No longer can read this URI, which means no children from this URI
-            } catch (e: NullPointerException) {
+            } catch (e: Exception) {
+                // Could be anything: NullPointerException, IllegalArgumentException, etc.
+                Log.i(TAG, "Unable to load images from $treeUri", e)
             }
         }
     }
 
     @SuppressLint("Recycle")
     private suspend fun addMediaUri(providerClient: ProviderClient): Result {
-        if (ContextCompat.checkSelfPermission(applicationContext,
-                        android.Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+        if (!RequestStoragePermissions.checkSelfPermission(applicationContext)) {
             Log.w(TAG, "Missing read external storage permission.")
             return Result.failure()
         }
@@ -267,9 +272,8 @@ class GalleryScanWorker(
             }
             val lastToken = providerClient.lastAddedArtwork?.token
 
-            val random = Random()
             val randomSequence = generateSequence {
-                random.nextInt(data.count)
+                Random.nextInt(data.count)
             }.distinct().take(data.count)
             val iterator = randomSequence.iterator()
             while (iterator.hasNext()) {
@@ -279,9 +283,17 @@ class GalleryScanWorker(
                             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
                             data.getLong(0))
                     if (imageUri.toString() != lastToken) {
+                        val metadataUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                                && ContextCompat.checkSelfPermission(applicationContext,
+                                        Manifest.permission.ACCESS_MEDIA_LOCATION) ==
+                                PackageManager.PERMISSION_GRANTED) {
+                            MediaStore.setRequireOriginal(imageUri)
+                        } else {
+                            imageUri
+                        }
                         providerClient.addArtwork(createArtwork(
                                 MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                                imageUri))
+                                imageUri, metadataUri = metadataUri))
                         return Result.success()
                     }
                 }
@@ -289,39 +301,38 @@ class GalleryScanWorker(
             if (BuildConfig.DEBUG) {
                 Log.i(TAG, "Unable to find any other valid photos in the gallery")
             }
-            return Result.failure()
         } ?: run {
             Log.w(TAG, "Empty cursor.")
-            return Result.failure()
         }
+        return Result.failure()
     }
 
     private suspend fun createArtwork(
             baseUri: Uri,
             imageUri: Uri = baseUri,
-            publicWebUri: Uri = imageUri
+            publicWebUri: Uri = imageUri,
+            metadataUri: Uri = imageUri
     ): Artwork {
-        val imageMetadata = ensureMetadataExists(imageUri)
+        val imageMetadata = ensureMetadataExists(metadataUri)
+        val date = imageMetadata.date
 
-        return Artwork().apply {
-            token = imageUri.toString()
-            persistentUri = imageUri
-            webUri = publicWebUri
-            metadata = baseUri.toString()
-            val date = imageMetadata.date
+        return Artwork(
+            token = imageUri.toString(),
+            persistentUri = imageUri,
+            webUri = publicWebUri,
+            metadata = baseUri.toString(),
             title = if (date != null) {
                 DateUtils.formatDateTime(applicationContext, date.time,
                         DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_YEAR
                                 or DateUtils.FORMAT_SHOW_WEEKDAY)
             } else {
                 applicationContext.getString(R.string.gallery_from_gallery)
-            }
+            },
             byline = if (imageMetadata.location.isNullOrBlank()) {
                 applicationContext.getString(R.string.gallery_touch_to_view)
             } else {
                 imageMetadata.location
-            }
-        }
+            })
     }
 
     private suspend fun ensureMetadataExists(imageUri: Uri): Metadata {
@@ -338,15 +349,16 @@ class GalleryScanWorker(
             applicationContext.contentResolver.openInputStream(imageUri)?.use { input ->
                 val exifInterface = ExifInterface(input)
                 val dateString = exifInterface.getAttribute(ExifInterface.TAG_DATETIME)
-                if (!TextUtils.isEmpty(dateString)) {
+                if (!dateString.isNullOrEmpty()) {
                     metadata.date = EXIF_DATE_FORMAT.parse(dateString)
                 }
 
                 exifInterface.latLong?.apply {
                     // Reverse geocode
                     val addresses = try {
+                        @Suppress("DEPRECATION")
                         geocoder.getFromLocation(this[0], this[1], 1)
-                    } catch (e: IllegalArgumentException) {
+                    } catch (e: Exception) {
                         Log.w(TAG, "Invalid latitude/longitude, skipping location metadata", e)
                         null
                     }

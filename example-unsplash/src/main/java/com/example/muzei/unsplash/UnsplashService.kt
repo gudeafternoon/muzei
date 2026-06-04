@@ -21,6 +21,7 @@ import okhttp3.OkHttpClient
 import retrofit2.Call
 import retrofit2.Retrofit
 import retrofit2.converter.moshi.MoshiConverterFactory
+import retrofit2.create
 import retrofit2.http.GET
 import retrofit2.http.Path
 import java.io.IOException
@@ -33,7 +34,7 @@ internal interface UnsplashService {
             val okHttpClient = OkHttpClient.Builder()
                     .addInterceptor { chain ->
                         var request = chain.request()
-                        val url = request.url().newBuilder()
+                        val url = request.url.newBuilder()
                                 .addQueryParameter("client_id", CONSUMER_KEY).build()
                         request = request.newBuilder().url(url).build()
                         chain.proceed(request)
@@ -46,11 +47,11 @@ internal interface UnsplashService {
                     .addConverterFactory(MoshiConverterFactory.create())
                     .build()
 
-            return retrofit.create<UnsplashService>(UnsplashService::class.java)
+            return retrofit.create()
         }
 
         @Throws(IOException::class)
-        internal fun popularPhotos(): List<UnsplashService.Photo> {
+        internal fun popularPhotos(): List<Photo> {
             return createService().popularPhotos.execute().body()
                     ?: throw IOException("Response was null")
         }
@@ -61,7 +62,7 @@ internal interface UnsplashService {
         }
     }
 
-    @get:GET("photos/curated?order_by=popular&per_page=30")
+    @get:GET("photos?order_by=popular&per_page=30")
     val popularPhotos: Call<List<Photo>>
 
     @GET("photos/{id}/download")

@@ -19,13 +19,14 @@ package com.google.android.apps.muzei.tasker
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import androidx.core.os.bundleOf
-import com.google.android.apps.muzei.sources.SourceManager
 import com.google.android.apps.muzei.sync.ProviderManager
 import com.google.android.apps.muzei.util.goAsync
+import com.google.firebase.Firebase
 import com.google.firebase.analytics.FirebaseAnalytics
-import com.twofortyfouram.locale.api.Intent.ACTION_FIRE_SETTING
-import com.twofortyfouram.locale.api.Intent.EXTRA_BUNDLE
+import com.google.firebase.analytics.analytics
+import com.google.firebase.analytics.logEvent
+import com.joaomgcd.taskerpluginlibrary.TaskerPluginConstants.ACTION_FIRE_SETTING
+import com.joaomgcd.taskerpluginlibrary.TaskerPluginConstants.EXTRA_BUNDLE
 
 /**
  * Tasker FIRE_SETTING receiver that fires a [TaskerAction]
@@ -37,25 +38,27 @@ class TaskerActionReceiver : BroadcastReceiver() {
             return
         }
         goAsync {
-            val selectedAction = TaskerAction.fromBundle(intent.getBundleExtra(EXTRA_BUNDLE))
-            when (selectedAction) {
+            when (val selectedAction = TaskerAction.fromBundle(
+                    intent.getBundleExtra(EXTRA_BUNDLE))) {
                 is SelectProviderAction -> {
                     val authority = selectedAction.authority
+                    @Suppress("DEPRECATION")
                     if (context.packageManager.resolveContentProvider(authority, 0) != null) {
-                        FirebaseAnalytics.getInstance(context).logEvent(
-                                FirebaseAnalytics.Event.SELECT_CONTENT, bundleOf(
-                                FirebaseAnalytics.Param.ITEM_ID to authority,
-                                FirebaseAnalytics.Param.ITEM_CATEGORY to "providers",
-                                FirebaseAnalytics.Param.CONTENT_TYPE to "tasker"))
+                        Firebase.analytics.logEvent(FirebaseAnalytics.Event.SELECT_ITEM) {
+                            param(FirebaseAnalytics.Param.ITEM_LIST_ID, authority)
+                            param(FirebaseAnalytics.Param.ITEM_LIST_NAME, "providers")
+                            param(FirebaseAnalytics.Param.CONTENT_TYPE, "tasker")
+                        }
                         ProviderManager.select(context, authority)
                     }
                 }
                 is NextArtworkAction -> {
-                    FirebaseAnalytics.getInstance(context).logEvent(
-                            "next_artwork", bundleOf(
-                            FirebaseAnalytics.Param.CONTENT_TYPE to "tasker"))
-                    SourceManager.nextArtwork(context)
+                    Firebase.analytics.logEvent("next_artwork") {
+                        param(FirebaseAnalytics.Param.CONTENT_TYPE, "tasker")
+                    }
+                    ProviderManager.getInstance(context).nextArtwork()
                 }
+                is InvalidAction -> {}
             }
         }
     }

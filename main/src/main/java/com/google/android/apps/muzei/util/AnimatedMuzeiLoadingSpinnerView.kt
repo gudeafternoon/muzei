@@ -31,6 +31,7 @@ import android.util.TypedValue
 import android.view.View
 import android.view.animation.LinearInterpolator
 import java.text.ParseException
+import kotlin.math.max
 
 class AnimatedMuzeiLoadingSpinnerView @JvmOverloads constructor(context: Context, attrs: AttributeSet? = null, defStyle: Int = 0) : View(context, attrs, defStyle) {
 
@@ -63,7 +64,7 @@ class AnimatedMuzeiLoadingSpinnerView @JvmOverloads constructor(context: Context
         // instead. Ideally this should be toggled using a heuristic based on the number
         // and or dimensions of paths to render.
         // Note that PathDashPathEffects can lead to clipping issues with hardware rendering.
-        setLayerType(View.LAYER_TYPE_SOFTWARE, null)
+        setLayerType(LAYER_TYPE_SOFTWARE, null)
     }
 
     fun start() {
@@ -146,13 +147,13 @@ class AnimatedMuzeiLoadingSpinnerView @JvmOverloads constructor(context: Context
     }
 
     private data class GlyphData(val path: Path, val paint: Paint) {
-        internal val length: Float
+        val length: Float
 
         init {
             val pm = PathMeasure(path, true)
             var len = pm.length
             while (true) {
-                len = Math.max(len, pm.length)
+                len = max(len, pm.length)
                 if (!pm.nextContour()) {
                     break
                 }

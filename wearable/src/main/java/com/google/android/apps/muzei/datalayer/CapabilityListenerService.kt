@@ -21,6 +21,7 @@ import android.content.pm.PackageManager
 import com.google.android.apps.muzei.sync.ProviderManager
 import com.google.android.gms.wearable.CapabilityInfo
 import com.google.android.gms.wearable.WearableListenerService
+import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 import net.nurik.roman.muzei.BuildConfig.DATA_LAYER_AUTHORITY
@@ -30,19 +31,20 @@ import net.nurik.roman.muzei.BuildConfig.DATA_LAYER_AUTHORITY
  */
 class CapabilityListenerService : WearableListenerService() {
 
-    override fun onCapabilityChanged(capabilityInfo: CapabilityInfo?) {
-        val removed = capabilityInfo?.nodes?.isEmpty() ?: false
+    @OptIn(DelicateCoroutinesApi::class)
+    override fun onCapabilityChanged(capabilityInfo: CapabilityInfo) {
+        val removed = capabilityInfo.nodes.isEmpty()
         if (!removed) {
             // Muzei's phone app is installed, allow use of the DataLayerArtProvider
             packageManager.setComponentEnabledSetting(
                     ComponentName(this, DataLayerArtProvider::class.java),
                     PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
                     PackageManager.DONT_KILL_APP)
-            if (ActivateMuzeiIntentService.hasPendingInstall(this)) {
+            if (ActivateMuzeiReceiver.hasPendingInstall(this)) {
                 val context = this
                 GlobalScope.launch {
                     ProviderManager.select(context, DATA_LAYER_AUTHORITY)
-                    ActivateMuzeiIntentService.resetPendingInstall(context)
+                    ActivateMuzeiReceiver.resetPendingInstall(context)
                 }
             }
         }

@@ -18,34 +18,48 @@ package com.google.android.apps.muzei
 
 import android.app.Activity
 import android.content.ActivityNotFoundException
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.graphics.Rect
 import android.os.Bundle
 import android.util.Log
-import android.view.View
 import android.view.ViewGroup
-import android.widget.Button
+import androidx.activity.result.contract.ActivityResultContract
 import androidx.activity.viewModels
-import androidx.core.os.bundleOf
 import androidx.fragment.app.FragmentActivity
-import androidx.lifecycle.observe
+import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import androidx.wear.widget.WearableLinearLayoutManager
-import androidx.wear.widget.WearableRecyclerView
 import com.google.android.apps.muzei.api.provider.MuzeiArtProvider
 import com.google.android.apps.muzei.sync.ProviderManager
+import com.google.android.apps.muzei.util.collectIn
+import com.google.firebase.Firebase
 import com.google.firebase.analytics.FirebaseAnalytics
-import kotlinx.coroutines.GlobalScope
+import com.google.firebase.analytics.analytics
+import com.google.firebase.analytics.logEvent
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import net.nurik.roman.muzei.R
+import net.nurik.roman.muzei.databinding.ChooseProviderActivityBinding
+import net.nurik.roman.muzei.databinding.ChooseProviderWearItemBinding
+
+private class StartActivityFromSettings : ActivityResultContract<ComponentName, Boolean>() {
+    override fun createIntent(context: Context, input: ComponentName): Intent =
+            Intent().setComponent(input)
+                    .putExtra(MuzeiArtProvider.EXTRA_FROM_MUZEI, true)
+
+    override fun parseResult(resultCode: Int, intent: Intent?): Boolean =
+            resultCode == Activity.RESULT_OK
+}
 
 class ChooseProviderActivity : FragmentActivity() {
 
     companion object {
         private const val TAG = "ChooseProviderFragment"
-        private const val REQUEST_EXTENSION_SETUP = 1
         private const val START_ACTIVITY_PROVIDER = "startActivityProvider"
     }
 
@@ -53,18 +67,37 @@ class ChooseProviderActivity : FragmentActivity() {
 
     private val adapter = ProviderAdapter()
 
+    private lateinit var binding: ChooseProviderActivityBinding
+
     private var startActivityProvider: String? = null
+    private val providerSetup = registerForActivityResult(StartActivityFromSettings()) { success ->
+        val provider = startActivityProvider
+        if (success && provider != null) {
+            Firebase.analytics.logEvent(FirebaseAnalytics.Event.SELECT_ITEM) {
+                param(FirebaseAnalytics.Param.ITEM_LIST_ID, provider)
+                param(FirebaseAnalytics.Param.ITEM_LIST_NAME, "providers")
+                param(FirebaseAnalytics.Param.CONTENT_TYPE, "after_setup")
+            }
+            lifecycleScope.launch {
+                withContext(NonCancellable) {
+                    ProviderManager.select(this@ChooseProviderActivity, provider)
+                    finish()
+                }
+            }
+        }
+        startActivityProvider = null
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         startActivityProvider = savedInstanceState?.getString(START_ACTIVITY_PROVIDER)
-        setContentView(R.layout.choose_provider_activity)
-        val providerList = findViewById<WearableRecyclerView>(R.id.provider_list)
-        providerList.isEdgeItemsCenteringEnabled = true
-        providerList.layoutManager = WearableLinearLayoutManager(this)
-        providerList.adapter = adapter
+        binding = ChooseProviderActivityBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+        binding.list.isEdgeItemsCenteringEnabled = true
+        binding.list.layoutManager = WearableLinearLayoutManager(this)
+        binding.list.adapter = adapter
 
-        viewModel.providers.observe(this) { providers ->
+        viewModel.providers.collectIn(this) { providers ->
             adapter.submitList(providers)
         }
     }
@@ -77,10 +110,7 @@ class ChooseProviderActivity : FragmentActivity() {
     private fun launchProviderSetup(provider: ProviderInfo) {
         try {
             startActivityProvider = provider.authority
-            val setupIntent = Intent()
-                    .setComponent(provider.setupActivity)
-                    .putExtra(MuzeiArtProvider.EXTRA_FROM_MUZEI, true)
-            startActivityForResult(setupIntent, REQUEST_EXTENSION_SETUP)
+            providerSetup.launch(provider.setupActivity!!)
         } catch (e: ActivityNotFoundException) {
             Log.e(TAG, "Can't launch provider setup.", e)
         } catch (e: SecurityException) {
@@ -88,47 +118,33 @@ class ChooseProviderActivity : FragmentActivity() {
         }
     }
 
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        when (requestCode) {
-            REQUEST_EXTENSION_SETUP -> {
-                val provider = startActivityProvider
-                if (resultCode == Activity.RESULT_OK && provider != null) {
-                    FirebaseAnalytics.getInstance(this).logEvent(
-                            FirebaseAnalytics.Event.SELECT_CONTENT, bundleOf(
-                            FirebaseAnalytics.Param.ITEM_ID to provider,
-                            FirebaseAnalytics.Param.CONTENT_TYPE to "providers",
-                            FirebaseAnalytics.Param.CONTENT_TYPE to "after_setup"))
-                    GlobalScope.launch {
-                        ProviderManager.select(this@ChooseProviderActivity, provider)
-                        finish()
-                    }
-                }
-                startActivityProvider = null
-            }
-            else -> super.onActivityResult(requestCode, resultCode, data)
-        }
-    }
-
-    inner class ProviderViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
+    inner class ProviderViewHolder(
+            private val binding: ChooseProviderWearItemBinding
+    ) : RecyclerView.ViewHolder(binding.root) {
         fun setProviderInfo(providerInfo: ProviderInfo) {
-            val chooseProvider = itemView as Button
             val size = resources.getDimensionPixelSize(R.dimen.choose_provider_image_size)
             providerInfo.icon.bounds = Rect(0, 0, size, size)
-            chooseProvider.setCompoundDrawablesRelative(providerInfo.icon,
+            binding.chooseProvider.setCompoundDrawablesRelative(providerInfo.icon,
                     null, null, null)
-            chooseProvider.text = providerInfo.title
-            chooseProvider.setOnClickListener {
+            binding.chooseProvider.text = providerInfo.title
+            binding.chooseProvider.setOnClickListener {
                 if (providerInfo.setupActivity != null) {
                     launchProviderSetup(providerInfo)
                 } else {
-                    FirebaseAnalytics.getInstance(this@ChooseProviderActivity).logEvent(
-                            FirebaseAnalytics.Event.SELECT_CONTENT, bundleOf(
-                            FirebaseAnalytics.Param.ITEM_ID to providerInfo.authority,
-                            FirebaseAnalytics.Param.CONTENT_TYPE to "providers",
-                            FirebaseAnalytics.Param.CONTENT_TYPE to "choose"))
-                    GlobalScope.launch {
-                        ProviderManager.select(this@ChooseProviderActivity, providerInfo.authority)
-                        finish()
+                    Firebase.analytics.logEvent(FirebaseAnalytics.Event.SELECT_ITEM) {
+                        param(FirebaseAnalytics.Param.ITEM_LIST_ID, providerInfo.authority)
+                        param(FirebaseAnalytics.Param.ITEM_NAME, providerInfo.title)
+                        param(FirebaseAnalytics.Param.ITEM_LIST_NAME, "providers")
+                        param(FirebaseAnalytics.Param.CONTENT_TYPE, "choose")
+                    }
+                    lifecycleScope.launch {
+                        withContext(NonCancellable) {
+                            ProviderManager.select(
+                                this@ChooseProviderActivity,
+                                providerInfo.authority
+                            )
+                            finish()
+                        }
                     }
                 }
             }
@@ -145,8 +161,7 @@ class ChooseProviderActivity : FragmentActivity() {
             }
     ) {
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
-                ProviderViewHolder(layoutInflater.inflate(
-                        R.layout.choose_provider_item,
+                ProviderViewHolder(ChooseProviderWearItemBinding.inflate(layoutInflater,
                         parent, false))
 
         override fun onBindViewHolder(holder: ProviderViewHolder, position: Int) {

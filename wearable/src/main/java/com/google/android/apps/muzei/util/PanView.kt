@@ -31,6 +31,8 @@ import android.view.View
 import android.widget.EdgeEffect
 import android.widget.OverScroller
 import androidx.annotation.Keep
+import kotlin.math.max
+import kotlin.math.min
 
 /**
  * View which supports panning around an image larger than the screen size. Supports both scrolling
@@ -152,8 +154,8 @@ class PanView @JvmOverloads constructor(context: Context, attrs: AttributeSet? =
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
-        currentWidth = Math.max(1, w)
-        currentHeight = Math.max(1, h)
+        currentWidth = max(1, w)
+        currentHeight = max(1, h)
         updateScaledImage()
     }
 
@@ -162,15 +164,16 @@ class PanView @JvmOverloads constructor(context: Context, attrs: AttributeSet? =
 
         val width = image.width
         val height = image.height
-        scaledImage = if (width > height) {
-            val scalingFactor = currentHeight * 1f / height
-            val scaledWidth = Math.max(1, (scalingFactor * width).toInt())
-            Bitmap.createScaledBitmap(image, scaledWidth, currentHeight, true)
-        } else {
-            val scalingFactor = currentWidth * 1f / width
-            val scaledHeight = Math.max(1, (scalingFactor * height).toInt())
-            Bitmap.createScaledBitmap(image, currentWidth, scaledHeight, true)
-        }
+        val scaleHeightFactor = currentHeight * 1f / height
+        val scaleWidthFactor = currentWidth * 1f / width
+        // Use the larger scale factor to ensure that we center crop and don't show any
+        // black bars (rather than use the minimum and scale down to see the whole image)
+        val scalingFactor = max(scaleHeightFactor, scaleWidthFactor)
+        scaledImage = Bitmap.createScaledBitmap(
+                image,
+                (scalingFactor * width).toInt(),
+                (scalingFactor * height).toInt(),
+                true /* filter */)
         blurredImage = scaledImage.blur(context)
         scaledImage?.let {
             // Center the image
@@ -279,11 +282,11 @@ class PanView @JvmOverloads constructor(context: Context, attrs: AttributeSet? =
         // Constrain between currentWidth - scaledImage.getWidth() and 0
         // currentWidth - scaledImage.getWidth() -> right edge visible
         // 0 -> left edge visible
-        this.offsetX = Math.min(0f, Math.max((currentWidth - scaledImage.width).toFloat(), offsetX))
+        this.offsetX = min(0f, max((currentWidth - scaledImage.width).toFloat(), offsetX))
         // Constrain between currentHeight - scaledImage.getHeight() and 0
         // currentHeight - scaledImage.getHeight() -> bottom edge visible
         // 0 -> top edge visible
-        this.offsetY = Math.min(0f, Math.max((currentHeight - scaledImage.height).toFloat(), offsetY))
+        this.offsetY = min(0f, max((currentHeight - scaledImage.height).toFloat(), offsetY))
     }
 
     /**
@@ -297,7 +300,7 @@ class PanView @JvmOverloads constructor(context: Context, attrs: AttributeSet? =
             return true
         }
 
-        override fun onScroll(e1: MotionEvent, e2: MotionEvent, distanceX: Float, distanceY: Float): Boolean {
+        override fun onScroll(e1: MotionEvent?, e2: MotionEvent, distanceX: Float, distanceY: Float): Boolean {
             val scaledImage = scaledImage ?: return true
 
             val oldOffsetX = offsetX
@@ -338,7 +341,7 @@ class PanView @JvmOverloads constructor(context: Context, attrs: AttributeSet? =
             return true
         }
 
-        override fun onFling(e1: MotionEvent, e2: MotionEvent, velocityX: Float, velocityY: Float): Boolean {
+        override fun onFling(e1: MotionEvent?, e2: MotionEvent, velocityX: Float, velocityY: Float): Boolean {
             val scaledImage = scaledImage ?: return true
 
             releaseEdgeEffects()
@@ -376,13 +379,20 @@ class PanView @JvmOverloads constructor(context: Context, attrs: AttributeSet? =
         }
     }
 
+    override fun onDetachedFromWindow() {
+        handler?.run {
+            removeCallbacks(animateTickRunnable)
+        }
+        super.onDetachedFromWindow()
+    }
+
     ////////////////////////////////////////////////////////////////////////////////////////////////
     //
     //     Methods and classes related to view state persistence.
     //
     ////////////////////////////////////////////////////////////////////////////////////////////////
 
-    public override fun onSaveInstanceState(): Parcelable? {
+    public override fun onSaveInstanceState(): Parcelable {
         val superState = super.onSaveInstanceState()
         val ss = SavedState(superState)
         ss.offsetX = offsetX
@@ -405,7 +415,7 @@ class PanView @JvmOverloads constructor(context: Context, attrs: AttributeSet? =
     /**
      * Persistent state that is saved by PanView.
      */
-    class SavedState : View.BaseSavedState {
+    class SavedState : BaseSavedState {
 
         companion object {
             @Suppress("unused")

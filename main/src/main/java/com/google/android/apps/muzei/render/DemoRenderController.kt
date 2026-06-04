@@ -21,7 +21,7 @@ import android.animation.ObjectAnimator
 import android.content.Context
 import androidx.core.animation.doOnEnd
 import androidx.lifecycle.LifecycleOwner
-import com.google.android.apps.muzei.util.coroutineScope
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -29,7 +29,7 @@ import kotlinx.coroutines.launch
 class DemoRenderController(
         context: Context,
         renderer: MuzeiBlurRenderer,
-        callbacks: RenderController.Callbacks,
+        callbacks: Callbacks,
         private val allowFocus: Boolean
 ) : RenderController(context, renderer, callbacks) {
 
@@ -61,16 +61,16 @@ class DemoRenderController(
         if (allowFocus) {
             coroutineScope.launch {
                 delay(FOCUS_DELAY_TIME_MILLIS)
-                renderer.setIsBlurred(false, false)
+                renderer.setIsBlurred(isBlurred = false, artDetailMode = false)
                 delay(FOCUS_TIME_MILLIS)
-                renderer.setIsBlurred(true, false)
+                renderer.setIsBlurred(isBlurred = true, artDetailMode = false)
             }
         }
     }
 
     override fun onCreate(owner: LifecycleOwner) {
         super.onCreate(owner)
-        coroutineScope = owner.coroutineScope
+        coroutineScope = owner.lifecycleScope
         runAnimation()
     }
 

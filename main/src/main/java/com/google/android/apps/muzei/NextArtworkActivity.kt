@@ -16,25 +16,31 @@
 
 package com.google.android.apps.muzei
 
-import android.app.Activity
 import android.os.Bundle
-import androidx.core.os.bundleOf
-import com.google.android.apps.muzei.sources.SourceManager
+import androidx.activity.ComponentActivity
+import androidx.lifecycle.lifecycleScope
+import com.google.android.apps.muzei.sync.ProviderManager
+import com.google.firebase.Firebase
 import com.google.firebase.analytics.FirebaseAnalytics
-import kotlinx.coroutines.GlobalScope
+import com.google.firebase.analytics.analytics
+import com.google.firebase.analytics.logEvent
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Simple activity that just triggers the 'Next Artwork' action and finishes
  */
-class NextArtworkActivity : Activity() {
+class NextArtworkActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        GlobalScope.launch {
-            FirebaseAnalytics.getInstance(this@NextArtworkActivity).logEvent(
-                    "next_artwork", bundleOf(
-                    FirebaseAnalytics.Param.CONTENT_TYPE to "activity_shortcut"))
-            SourceManager.nextArtwork(this@NextArtworkActivity)
+        lifecycleScope.launch {
+            withContext(NonCancellable) {
+                Firebase.analytics.logEvent("next_artwork") {
+                    param(FirebaseAnalytics.Param.CONTENT_TYPE, "activity_shortcut")
+                }
+                ProviderManager.getInstance(this@NextArtworkActivity).nextArtwork()
+            }
         }
         finish()
     }

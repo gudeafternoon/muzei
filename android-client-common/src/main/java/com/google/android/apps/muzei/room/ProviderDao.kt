@@ -21,27 +21,35 @@ import androidx.room.Dao
 import androidx.room.Delete
 import androidx.room.Insert
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.Update
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.Flow
 
 /**
  * Dao for Providers
  */
 @Dao
 abstract class ProviderDao {
-    @get:Query("SELECT * FROM provider")
-    abstract val currentProvider: LiveData<Provider?>
+    @Query("SELECT * FROM provider")
+    abstract fun getCurrentProviderFlow(): Flow<Provider?>
 
-    @get:Query("SELECT * FROM provider")
-    internal abstract val currentProviderBlocking: Provider?
+    @Query("SELECT * FROM provider")
+    abstract fun getCurrentProviderLiveData(): LiveData<Provider?>
 
-    suspend fun getCurrentProvider() = withContext(Dispatchers.Default) {
-        currentProviderBlocking
+    @Query("SELECT * FROM provider")
+    internal abstract fun getCurrentProviderBlocking(): Provider?
+
+    @Query("SELECT * FROM provider")
+    abstract suspend fun getCurrentProvider(): Provider?
+
+    @Transaction
+    open suspend fun select(authority: String) {
+        deleteAll()
+        insert(Provider(authority))
     }
 
     @Insert
-    abstract fun insert(provider: Provider)
+    internal abstract suspend fun insert(provider: Provider)
 
     @Update
     abstract suspend fun update(provider: Provider)
@@ -50,5 +58,5 @@ abstract class ProviderDao {
     abstract suspend fun delete(provider: Provider)
 
     @Query("DELETE FROM provider")
-    abstract fun deleteAll()
+    internal abstract suspend fun deleteAll()
 }

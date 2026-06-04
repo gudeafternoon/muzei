@@ -24,10 +24,12 @@ import android.os.Build
 import androidx.annotation.RequiresApi
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.observe
 import com.google.android.apps.muzei.ArtworkInfoRedirectActivity
 import com.google.android.apps.muzei.room.Artwork
 import com.google.android.apps.muzei.room.MuzeiDatabase
+import com.google.android.apps.muzei.util.collectIn
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import net.nurik.roman.muzei.R
 
 /**
@@ -35,8 +37,7 @@ import net.nurik.roman.muzei.R
  */
 @RequiresApi(Build.VERSION_CODES.N_MR1)
 class ArtworkInfoShortcutController(
-        private val context: Context,
-        private val lifecycleOwner: LifecycleOwner
+        private val context: Context
 ) : DefaultLifecycleObserver {
 
     companion object {
@@ -44,15 +45,17 @@ class ArtworkInfoShortcutController(
     }
 
     override fun onCreate(owner: LifecycleOwner) {
-        MuzeiDatabase.getInstance(context).artworkDao()
-                .currentArtwork.observe(lifecycleOwner) { artwork ->
+        val database = MuzeiDatabase.getInstance(context)
+        database.artworkDao().getCurrentArtworkFlow().collectIn(owner) { artwork ->
             updateShortcut(artwork)
         }
     }
 
-    private fun updateShortcut(artwork: Artwork?) {
+    private suspend fun updateShortcut(artwork: Artwork?) {
         val shortcutManager = context.getSystemService(ShortcutManager::class.java)
-        val dynamicShortcuts = shortcutManager?.dynamicShortcuts ?: return
+        val dynamicShortcuts = withContext(Dispatchers.Default) {
+            shortcutManager?.dynamicShortcuts
+        } ?: return
         var artworkInfoShortcutInfo: ShortcutInfo? = null
         for (shortcutInfo in dynamicShortcuts) {
             if (shortcutInfo.id == ARTWORK_INFO_SHORTCUT_ID) {
@@ -73,8 +76,9 @@ class ArtworkInfoShortcutController(
                     .setShortLabel(context.getString(R.string.action_artwork_info))
                     .setIntent(ArtworkInfoRedirectActivity.getIntent(context, "shortcut"))
                     .build()
-            shortcutManager.addDynamicShortcuts(
-                    listOf(shortcutInfo))
+            withContext(Dispatchers.Default) {
+                shortcutManager.addDynamicShortcuts(listOf(shortcutInfo))
+            }
         } else {
             if (artworkInfoShortcutInfo?.isEnabled == false) {
                 shortcutManager.disableShortcuts(

@@ -16,36 +16,34 @@
 
 package com.google.android.apps.muzei.single
 
-import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.component1
+import androidx.activity.result.component2
+import androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult
 
 /**
  * Setup Activity which ensures that the user has a single image selected
  */
-class SingleSetupActivity : Activity() {
+class SingleSetupActivity : ComponentActivity() {
 
-    companion object {
-        private const val REQUEST_SELECT_IMAGE = 1
+    private val selectImage = registerForActivityResult(StartActivityForResult()) { (resultCode, _) ->
+        // Pass on the resultCode from the SingleSettingsActivity onto Muzei
+        setResult(resultCode)
+        finish()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         if (SingleArtProvider.getArtworkFile(this).exists()) {
             // We already have a single artwork available
             setResult(RESULT_OK)
             finish()
         } else {
-            startActivityForResult(
-                    Intent(this, SingleSettingsActivity::class.java),
-                    REQUEST_SELECT_IMAGE)
+            selectImage.launch(Intent(this, SingleSettingsActivity::class.java))
         }
-    }
-
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        // Pass on the resultCode from the SingleSettingsActivity onto Muzei
-        setResult(if (requestCode == REQUEST_SELECT_IMAGE) resultCode else RESULT_CANCELED)
-        finish()
     }
 }

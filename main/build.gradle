@@ -14,37 +14,37 @@
  * limitations under the License.
  */
 
-apply plugin: 'com.android.application'
-apply plugin: 'kotlin-android'
-apply plugin: 'kotlin-kapt'
-apply plugin: 'com.google.firebase.firebase-perf'
-apply plugin: 'io.fabric'
-apply plugin: 'androidx.navigation.safeargs'
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
-project.archivesBaseName = "muzei"
+apply plugin: 'com.android.application'
+apply plugin: 'org.jetbrains.kotlin.plugin.compose'
+apply plugin: 'com.google.gms.google-services'
+apply plugin: 'com.google.firebase.crashlytics'
+apply plugin: 'com.google.firebase.firebase-perf'
+apply plugin: 'androidx.navigation.safeargs.kotlin'
+
+base { archivesName = "muzei" }
 
 android {
-    compileSdkVersion rootProject.ext.compileSdkVersion
+    namespace 'net.nurik.roman.muzei'
+    compileSdk libs.versions.compileSdk.get().toInteger()
 
     Properties versionProps = new Properties()
     versionProps.load(new FileInputStream(file('../version.properties')))
 
-    dexOptions.preDexLibraries true
+    buildFeatures {
+        buildConfig true
+        viewBinding true
+        compose true
+    }
 
     defaultConfig {
         applicationId "net.nurik.roman.muzei"
-        minSdkVersion 19
-        targetSdkVersion rootProject.ext.targetSdkVersion
+        minSdkVersion 23
+        targetSdkVersion libs.versions.targetSdk.get()
 
         versionName versionProps['name']
         versionCode versionProps['code'].toInteger()
-
-        multiDexEnabled true
-        wearAppUnbundled true
-
-        def sourcesAuthorityValue = "com.google.android.apps.muzei.sources"
-        manifestPlaceholders = [sourcesAuthority: sourcesAuthorityValue]
-        buildConfigField "String", "SOURCES_AUTHORITY", "\"${sourcesAuthorityValue}\""
 
         buildConfigField "String", "DEVICE_TYPE", "\"android\""
     }
@@ -67,12 +67,15 @@ android {
     buildTypes {
         debug {
             versionNameSuffix " Debug"
+            FirebasePerformance {
+                instrumentationEnabled false
+            }
         }
 
         release {
             minifyEnabled true
             shrinkResources true
-            proguardFiles getDefaultProguardFile('proguard-android.txt'), file('proguard-project.txt')
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), file('proguard-project.txt')
             signingConfig signingConfigs.release
         }
 
@@ -84,41 +87,54 @@ android {
         publicDebug.initWith(buildTypes.publicBeta)
         publicDebug {
             debuggable true
-            renderscriptDebuggable true
             versionNameSuffix " Debug " + versionProps['betaNumber']
         }
     }
 
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(JvmTarget.JVM_11)
+            freeCompilerArgs.add("-opt-in=kotlin.RequiresOptIn")
+        }
+    }
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
     }
 }
 
 dependencies {
-    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlinVersion"
-    api "org.jetbrains.kotlinx:kotlinx-coroutines-core:$coroutinesVersion"
-    api "org.jetbrains.kotlinx:kotlinx-coroutines-android:$coroutinesVersion"
-    implementation "androidx.multidex:multidex:$multidexVersion"
-    implementation "com.squareup.okhttp3:okhttp:$okhttpVersion"
-    implementation "com.github.bumptech.glide:glide:$glideVersion"
-    implementation "com.google.android.gms:play-services-wearable:$playServicesWearableVersion"
-    implementation "com.twofortyfouram:android-plugin-api-for-locale:1.0.4"
-    implementation "androidx.core:core-ktx:$coreVersion"
-    implementation "androidx.fragment:fragment-ktx:$fragmentVersion"
-    implementation "androidx.appcompat:appcompat:$appCompatVersion"
-    implementation "androidx.recyclerview:recyclerview:$recyclerViewVersion"
-    implementation "com.google.android.material:material:$materialVersion"
-    implementation "androidx.browser:browser:$browserVersion"
-    implementation "androidx.exifinterface:exifinterface:$exifInterfaceVersion"
-    implementation "androidx.constraintlayout:constraintlayout:$constraintLayoutVersion"
-    implementation "androidx.lifecycle:lifecycle-livedata-ktx:$lifecycleVersion"
-    implementation "androidx.lifecycle:lifecycle-common-java8:$lifecycleVersion"
-    implementation "androidx.lifecycle:lifecycle-runtime:$lifecycleVersion"
-    implementation "androidx.lifecycle:lifecycle-viewmodel-ktx:$lifecycleVersion"
-    kapt "androidx.lifecycle:lifecycle-compiler:$lifecycleVersion"
-    implementation "android.arch.navigation:navigation-fragment-ktx:$navigationVersion"
-    implementation "android.arch.navigation:navigation-ui-ktx:$navigationVersion"
+    api libs.coroutines.core
+    api libs.coroutines.android
+    api libs.coroutines.playservices
+    implementation libs.coil.compose
+    implementation libs.coil.runtime
+    implementation libs.coil.okhttp
+    implementation libs.wearable.playservices
+    implementation libs.tasker
+    implementation libs.subsampling
+    implementation libs.activity
+    implementation libs.core
+    implementation platform(libs.compose.bom)
+    implementation libs.compose.animation.graphics
+    implementation libs.compose.icons
+    implementation libs.compose.livedata
+    implementation libs.compose.material3
+    implementation libs.compose.ui.tooling.preview
+    debugImplementation libs.compose.ui.tooling.runtime
+    implementation libs.fragment
+    implementation libs.appCompat
+    implementation libs.lifecycle.runtime
+    implementation libs.lifecycle.viewmodel
+    implementation libs.recyclerView
+    implementation libs.material
+    implementation libs.browser
+    implementation libs.exifInterface
+    implementation libs.lifecycle.livedata
+    implementation libs.lifecycle.common
+    implementation libs.preference
+    implementation libs.navigation.fragment
+    implementation libs.navigation.ui
 
     implementation project(':muzei-api')
     implementation project(':extensions')

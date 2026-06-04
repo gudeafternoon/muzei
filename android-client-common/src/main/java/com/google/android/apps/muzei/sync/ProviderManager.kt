@@ -29,24 +29,24 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.RemoteException
-import android.preference.PreferenceManager
 import android.util.Log
+import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.Observer
+import androidx.preference.PreferenceManager
 import com.google.android.apps.muzei.api.internal.ProtocolConstants
 import com.google.android.apps.muzei.api.provider.ProviderContract
 import com.google.android.apps.muzei.room.Artwork
 import com.google.android.apps.muzei.room.MuzeiDatabase
 import com.google.android.apps.muzei.room.Provider
 import com.google.android.apps.muzei.util.ContentProviderClientCompat
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import net.nurik.roman.muzei.androidclientcommon.BuildConfig
 import java.util.concurrent.Executors
 
@@ -63,7 +63,16 @@ internal val syncSingleThreadContext by lazy {
  * Manager which monitors the current Provider
  */
 class ProviderManager private constructor(private val context: Context)
-    : MutableLiveData<Provider>(), Observer<Provider?> {
+    : MutableLiveData<Provider?>(), Observer<Provider?> {
+
+    /**
+     * Enum that represents the order in which new artwork is loaded
+     */
+    enum class LoadOrdering {
+        IN_ORDER,
+        NEW_IN_ORDER,
+        RANDOM,
+    }
 
     companion object {
         private const val TAG = "ProviderManager"
@@ -71,6 +80,8 @@ class ProviderManager private constructor(private val context: Context)
         private const val DEFAULT_LOAD_FREQUENCY_SECONDS = 3600L
         private const val PREF_LOAD_ON_WIFI = "loadOnWifi"
         private const val DEFAULT_LOAD_ON_WIFI = false
+        private const val PREF_LOAD_ORDERING = "loadOrdering"
+        private val DEFAULT_LOAD_ORDERING = LoadOrdering.NEW_IN_ORDER
 
         @SuppressLint("StaticFieldLeak")
         @Volatile
@@ -82,15 +93,19 @@ class ProviderManager private constructor(private val context: Context)
                             .also { instance = it }
                 }
 
-        suspend fun select(context: Context, authority: String) = withContext(Dispatchers.Default) {
-            val database = MuzeiDatabase.getInstance(context)
-            database.beginTransaction()
+        suspend fun select(context: Context, authority: String) {
+            val currentAuthority = getInstance(context).value?.authority
+            if (authority != currentAuthority) {
+                MuzeiDatabase.getInstance(context).providerDao().select(authority)
+            }
+        }
+
+        suspend fun requestLoad(context: Context, contentUri: Uri) {
             try {
-                database.providerDao().deleteAll()
-                database.providerDao().insert(Provider(authority))
-                database.setTransactionSuccessful()
-            } finally {
-                database.endTransaction()
+                ContentProviderClientCompat.getClient(context, contentUri)?.call(
+                        ProtocolConstants.METHOD_REQUEST_LOAD)
+            } catch (e: RemoteException) {
+                Log.i(TAG, "Provider ${contentUri.authority} crashed while requesting load", e)
             }
         }
 
@@ -100,39 +115,54 @@ class ProviderManager private constructor(private val context: Context)
                     .authority(authority)
                     .build()
             return ContentProviderClientCompat.getClient(context, contentUri)?.use { client ->
-                return try {
+                try {
                     val result = client.call(ProtocolConstants.METHOD_GET_DESCRIPTION)
                     result?.getString(ProtocolConstants.KEY_DESCRIPTION, "") ?: ""
                 } catch (e: RemoteException) {
-                    Log.i(TAG, "Provider ${this} crashed while retrieving description", e)
+                    Log.i(TAG, "Provider $authority crashed while retrieving description", e)
                     ""
                 }
             } ?: ""
         }
     }
-
     private val packageChangeReceiver : BroadcastReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent?) {
             val provider = value ?: return
             val packageName = intent?.data?.schemeSpecificPart
+            val changedComponents = intent?.getStringArrayExtra(
+                    Intent.EXTRA_CHANGED_COMPONENT_NAME_LIST) ?: emptyArray()
             val pm = context.packageManager
+            @Suppress("DEPRECATION")
             @SuppressLint("InlinedApi")
             val providerInfo = pm.resolveContentProvider(provider.authority,
                     PackageManager.MATCH_DISABLED_COMPONENTS)
-            if (providerInfo == null || providerInfo.packageName == packageName) {
+            val providerComponentName = providerInfo?.name
+            val wholePackageChanged = changedComponents.any { it == packageName }
+            val providerChanged = providerInfo != null
+                    && changedComponents.any { it == providerComponentName }
+            if (providerInfo == null || (providerInfo.packageName == packageName
+                            && (wholePackageChanged || providerChanged))) {
                 // The selected provider changed, so restart loading
                 startArtworkLoad()
             }
         }
     }
-    private val contentObserver: ContentObserver
+    private val contentObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
+        override fun onChange(selfChange: Boolean, uri: Uri?) {
+            if (BuildConfig.DEBUG) {
+                Log.d(TAG, "onChange for $uri")
+            }
+            ProviderChangedWorker.enqueueChanged(context)
+        }
+    }
     private val providerLiveData by lazy {
-        MuzeiDatabase.getInstance(context).providerDao().currentProvider
+        MuzeiDatabase.getInstance(context).providerDao().getCurrentProviderLiveData()
     }
     private val artworkLiveData by lazy {
-        MuzeiDatabase.getInstance(context).artworkDao().currentArtwork
+        MuzeiDatabase.getInstance(context).artworkDao().getCurrentArtworkLiveData()
     }
     private var nextArtworkJob: Job? = null
+    @OptIn(DelicateCoroutinesApi::class)
     private val artworkObserver = Observer<Artwork?> { artwork ->
         if (artwork == null) {
             // Can't have no artwork at all,
@@ -155,9 +185,9 @@ class ProviderManager private constructor(private val context: Context)
                 putLong(PREF_LOAD_FREQUENCY_SECONDS, newLoadFrequency)
             }
             if (newLoadFrequency > 0) {
-                ArtworkLoadWorker.enqueuePeriodic(newLoadFrequency, loadOnWifi)
+                ArtworkLoadWorker.enqueuePeriodic(context, newLoadFrequency, loadOnWifi)
             } else {
-                ArtworkLoadWorker.cancelPeriodic()
+                ArtworkLoadWorker.cancelPeriodic(context)
             }
         }
         get() = PreferenceManager.getDefaultSharedPreferences(context)
@@ -169,23 +199,24 @@ class ProviderManager private constructor(private val context: Context)
                 putBoolean(PREF_LOAD_ON_WIFI, newLoadOnWifi)
             }
             if (loadFrequencySeconds > 0) {
-                ArtworkLoadWorker.enqueuePeriodic(loadFrequencySeconds, newLoadOnWifi)
+                ArtworkLoadWorker.enqueuePeriodic(context, loadFrequencySeconds, newLoadOnWifi)
             }
         }
         get() = PreferenceManager.getDefaultSharedPreferences(context)
                 .getBoolean(PREF_LOAD_ON_WIFI, DEFAULT_LOAD_ON_WIFI)
 
-    init {
-        contentObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
-            override fun onChange(selfChange: Boolean, uri: Uri) {
-                if (BuildConfig.DEBUG) {
-                    Log.d(TAG, "onChange for $uri")
-                }
-                ProviderChangedWorker.enqueueChanged()
+    var loadOrdering: LoadOrdering
+        set(newLoadOrdering) {
+            PreferenceManager.getDefaultSharedPreferences(context).edit {
+                putString(PREF_LOAD_ORDERING, newLoadOrdering.name)
             }
         }
-    }
+        get() = LoadOrdering.valueOf(checkNotNull(PreferenceManager.getDefaultSharedPreferences(context)
+            .getString(PREF_LOAD_ORDERING, DEFAULT_LOAD_ORDERING.name)) {
+            "Invalid load ordering"
+        })
 
+    @SuppressLint("WrongConstant")
     override fun onActive() {
         if (BuildConfig.DEBUG) {
             Log.d(TAG, "ProviderManager became active")
@@ -198,7 +229,12 @@ class ProviderManager private constructor(private val context: Context)
             addAction(Intent.ACTION_PACKAGE_REPLACED)
             addAction(Intent.ACTION_PACKAGE_REMOVED)
         }
-        context.registerReceiver(packageChangeReceiver, packageChangeFilter)
+        ContextCompat.registerReceiver(
+            context,
+            packageChangeReceiver,
+            packageChangeFilter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             ProviderChangedWorker.activeListeningStateChanged(context, true)
         }
@@ -207,9 +243,11 @@ class ProviderManager private constructor(private val context: Context)
         startArtworkLoad()
     }
 
+    @OptIn(DelicateCoroutinesApi::class)
     private fun runIfValid(provider: Provider?, block: (provider: Provider) -> Unit) {
         if (provider != null) {
             val pm = context.packageManager
+            @Suppress("DEPRECATION")
             if (pm.resolveContentProvider(provider.authority, 0) != null) {
                 // resolveContentProvider succeeded, so it is a valid ContentProvider
                 block(provider)
@@ -235,15 +273,15 @@ class ProviderManager private constructor(private val context: Context)
                 val contentUri = ProviderContract.getContentUri(currentSource.authority)
                 context.contentResolver.registerContentObserver(
                         contentUri, true, contentObserver)
-                ProviderChangedWorker.enqueueSelected()
+                ProviderChangedWorker.enqueueSelected(context)
             }
         }
     }
 
-    override fun onChanged(newProvider: Provider?) {
-        val existingProvider = value
-        value = newProvider
-        runIfValid(newProvider) { provider ->
+    override fun onChanged(value: Provider?) {
+        val existingProvider = this.value
+        this.value = value
+        runIfValid(value) { provider ->
             if (existingProvider == null || provider.authority != existingProvider.authority) {
                 if (BuildConfig.DEBUG) {
                     Log.d(TAG, "Provider changed to ${provider.authority}")
@@ -258,7 +296,7 @@ class ProviderManager private constructor(private val context: Context)
         artworkLiveData.removeObserver(artworkObserver)
         providerLiveData.removeObserver(this)
         context.contentResolver.unregisterContentObserver(contentObserver)
-        ArtworkLoadWorker.cancelPeriodic()
+        ArtworkLoadWorker.cancelPeriodic(context)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             ProviderChangedWorker.activeListeningStateChanged(context, false)
@@ -270,6 +308,6 @@ class ProviderManager private constructor(private val context: Context)
     }
 
     fun nextArtwork() {
-        ArtworkLoadWorker.enqueueNext()
+        ArtworkLoadWorker.enqueueNext(context)
     }
 }

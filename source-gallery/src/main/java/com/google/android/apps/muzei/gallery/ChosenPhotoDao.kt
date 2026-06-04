@@ -24,19 +24,18 @@ import android.os.Binder
 import android.os.Build
 import android.provider.DocumentsContract
 import android.util.Log
-import androidx.lifecycle.LiveData
-import androidx.paging.DataSource
+import androidx.paging.PagingSource
 import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import com.google.android.apps.muzei.api.provider.ProviderContract
 import com.google.android.apps.muzei.gallery.BuildConfig.GALLERY_ART_AUTHORITY
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.Flow
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -53,49 +52,47 @@ internal abstract class ChosenPhotoDao {
     }
 
     @get:Query("SELECT * FROM chosen_photos ORDER BY _id DESC")
-    internal abstract val chosenPhotosPaged: DataSource.Factory<Int, ChosenPhoto>
+    internal abstract val chosenPhotosPaged: PagingSource<Int, ChosenPhoto>
 
     @get:Query("SELECT * FROM chosen_photos ORDER BY _id DESC")
-    internal abstract val chosenPhotos: LiveData<List<ChosenPhoto>>
+    internal abstract val chosenPhotosFlow: Flow<List<ChosenPhoto>>
 
     @get:Query("SELECT * FROM chosen_photos ORDER BY _id DESC")
     internal abstract val chosenPhotosBlocking: List<ChosenPhoto>
 
-    private suspend fun getChosenPhotos() = withContext(Dispatchers.Default) {
-        chosenPhotosBlocking
-    }
-
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     internal abstract suspend fun insertInternal(chosenPhoto: ChosenPhoto): Long
 
-    suspend fun insert(
+    @Transaction
+    open suspend fun insert(
             context: Context,
             chosenPhoto: ChosenPhoto,
             callingApplication: String?
-    ): Long = withContext(Dispatchers.Default) {
-        if (persistUriAccess(context, chosenPhoto)) {
-            val id = insertInternal(chosenPhoto)
-            if (id != 0L && callingApplication != null) {
-                val metadata = Metadata(ChosenPhoto.getContentUri(id), Date(),
-                        context.getString(R.string.gallery_shared_from, callingApplication))
-                GalleryDatabase.getInstance(context).metadataDao().insert(metadata)
-            }
-            GalleryScanWorker.enqueueInitialScan(listOf(id))
-            id
-        } else {
-            0L
+    ): Long = if (persistUriAccess(context, chosenPhoto)) {
+        val id = insertInternal(chosenPhoto)
+        if (id != 0L && callingApplication != null) {
+            val metadata = Metadata(ChosenPhoto.getContentUri(id), Date(),
+                    context.getString(R.string.gallery_shared_from, callingApplication))
+            GalleryDatabase.getInstance(context).metadataDao().insert(metadata)
         }
+        GalleryScanWorker.enqueueInitialScan(context, listOf(id))
+        id
+    } else {
+        0L
     }
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    internal abstract fun insertAllInternal(chosenPhoto: List<ChosenPhoto>): List<Long>
+    internal abstract suspend fun insertAllInternal(chosenPhoto: List<ChosenPhoto>): List<Long>
 
-    fun insertAll(context: Context, uris: Collection<Uri>) {
+    @Transaction
+    open suspend fun insertAll(context: Context, uris: Collection<Uri>) {
         insertAllInternal(uris
                 .map { ChosenPhoto(it) }
                 .filter { persistUriAccess(context, it) }
         ).run {
-            GalleryScanWorker.enqueueInitialScan(this)
+            if (isNotEmpty()) {
+                GalleryScanWorker.enqueueInitialScan(context, this)
+            }
         }
     }
 
@@ -105,7 +102,7 @@ internal abstract class ChosenPhotoDao {
             try {
                 context.contentResolver.takePersistableUriPermission(chosenPhoto.uri,
                         Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            } catch (ignored: SecurityException) {
+            } catch (_: SecurityException) {
                 // You can't persist URI permissions from your own app, so this fails.
                 // We'll still have access to it directly
             }
@@ -131,7 +128,7 @@ internal abstract class ChosenPhotoDao {
                                 Log.w(TAG, "Unable to delete $cachedFile")
                             }
                         }
-                    } catch (ignored: SecurityException) {
+                    } catch (_: SecurityException) {
                         // If we don't have FLAG_GRANT_PERSISTABLE_URI_PERMISSION (such as when using ACTION_GET_CONTENT),
                         // this will fail. We'll need to make a local copy (handled below)
                     }
@@ -157,14 +154,9 @@ internal abstract class ChosenPhotoDao {
         } else {
             try {
                 // Prior to N we can't directly check if the URI is a tree URI, so we have to just try it
-                val treeDocumentId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                    DocumentsContract.getTreeDocumentId(possibleTreeUri)
-                } else {
-                    // No tree URIs prior to Lollipop
-                    return false
-                }
+                val treeDocumentId = DocumentsContract.getTreeDocumentId(possibleTreeUri)
                 return treeDocumentId?.isNotEmpty() == true
-            } catch (e: IllegalArgumentException) {
+            } catch (_: IllegalArgumentException) {
                 // Definitely not a tree URI
                 return false
             }
@@ -192,26 +184,27 @@ internal abstract class ChosenPhotoDao {
     @Query("SELECT * FROM chosen_photos WHERE _id = :id")
     internal abstract fun chosenPhotoBlocking(id: Long): ChosenPhoto?
 
-    suspend fun getChosenPhoto(id: Long) = withContext(Dispatchers.Default) {
-        chosenPhotoBlocking(id)
-    }
+    @Query("SELECT * FROM chosen_photos WHERE _id = :id")
+    abstract suspend fun getChosenPhoto(id: Long): ChosenPhoto?
 
     @Query("SELECT * FROM chosen_photos WHERE _id IN (:ids)")
     abstract suspend fun getChosenPhotos(ids: List<Long>): List<ChosenPhoto>
 
     @Query("DELETE FROM chosen_photos WHERE _id IN (:ids)")
-    internal abstract fun deleteInternal(ids: List<Long>)
+    internal abstract suspend fun deleteInternal(ids: List<Long>)
 
-    suspend fun delete(context: Context, ids: List<Long>) = withContext(Dispatchers.Default) {
+    @Transaction
+    open suspend fun delete(context: Context, ids: List<Long>) {
         deleteBackingPhotos(context, getChosenPhotos(ids))
         deleteInternal(ids)
     }
 
     @Query("DELETE FROM chosen_photos")
-    internal abstract fun deleteAllInternal()
+    internal abstract suspend fun deleteAllInternal()
 
-    suspend fun deleteAll(context: Context) = withContext(Dispatchers.Default) {
-        deleteBackingPhotos(context, getChosenPhotos())
+    @Transaction
+    open suspend fun deleteAll(context: Context) {
+        deleteBackingPhotos(context, chosenPhotosBlocking)
         deleteAllInternal()
     }
 
@@ -249,7 +242,7 @@ internal abstract class ChosenPhotoDao {
                                 try {
                                     contentResolver.releasePersistableUriPermission(
                                             uriToRelease, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                } catch (e: SecurityException) {
+                                } catch (_: SecurityException) {
                                     // Thrown if we don't have permission...despite in being in
                                     // the getPersistedUriPermissions(). Alright then.
                                 }

@@ -14,24 +14,29 @@
  * limitations under the License.
  */
 
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 apply plugin: 'com.android.application'
-apply plugin: 'kotlin-android'
-apply plugin: 'kotlin-kapt'
+apply plugin: 'com.google.gms.google-services'
+apply plugin: 'com.google.firebase.crashlytics'
 apply plugin: 'com.google.firebase.firebase-perf'
-apply plugin: 'io.fabric'
 
 android {
-    compileSdkVersion rootProject.ext.compileSdkVersion
+    namespace 'net.nurik.roman.muzei'
+    compileSdk libs.versions.compileSdk.get().toInteger()
 
     Properties versionProps = new Properties()
     versionProps.load(new FileInputStream(file('../version.properties')))
 
-    dexOptions.preDexLibraries true
+    buildFeatures {
+        buildConfig true
+        viewBinding true
+    }
 
     defaultConfig {
         applicationId "net.nurik.roman.muzei"
-        minSdkVersion 23
-        targetSdkVersion 28
+        minSdkVersion 26
+        targetSdkVersion libs.versions.targetSdk.get()
 
         versionName versionProps['name']
         versionCode versionProps['codeWear'].toInteger()
@@ -61,12 +66,15 @@ android {
     buildTypes {
         debug {
             versionNameSuffix " Debug"
+            FirebasePerformance {
+                instrumentationEnabled false
+            }
         }
 
         release {
             minifyEnabled true
             shrinkResources true
-            proguardFiles getDefaultProguardFile('proguard-android.txt'), file('proguard-project.txt')
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), file('proguard-project.txt')
             signingConfig signingConfigs.release
         }
 
@@ -76,30 +84,36 @@ android {
         }
     }
 
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(JvmTarget.JVM_11)
+            freeCompilerArgs.add("-opt-in=kotlin.RequiresOptIn")
+        }
+    }
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
     }
 }
 
 dependencies {
-    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlinVersion"
-    api "org.jetbrains.kotlinx:kotlinx-coroutines-core:$coroutinesVersion"
-    api "org.jetbrains.kotlinx:kotlinx-coroutines-android:$coroutinesVersion"
-    implementation "android.arch.work:work-runtime-ktx:$workManagerVersion"
-    implementation "androidx.core:core-ktx:$coreVersion"
-    implementation "androidx.lifecycle:lifecycle-livedata-core-ktx:$lifecycleVersion"
-    implementation "androidx.fragment:fragment-ktx:$fragmentVersion"
-    implementation "androidx.exifinterface:exifinterface:$exifInterfaceVersion"
-    implementation "androidx.wear:wear:$wearVersion"
-    compileOnly "com.google.android.wearable:wearable:$wearableVersion"
-    implementation ("com.google.android.support:wearable:$wearableVersion") {
-        exclude module: 'support-v4'
-    }
-
-    implementation ("com.google.android.gms:play-services-wearable:$playServicesWearableVersion") {
-        exclude module: 'support-v4'
-    }
+    api libs.coroutines.core
+    api libs.coroutines.android
+    api libs.coroutines.playservices
+    implementation libs.coil.runtime
+    implementation libs.coil.okhttp
+    implementation libs.concurrent
+    implementation libs.workManager
+    implementation libs.core
+    implementation libs.lifecycle.livedata
+    implementation libs.fragment
+    implementation libs.exifInterface
+    implementation libs.preference
+    implementation libs.recyclerView
+    implementation libs.watchface.complications.data
+    implementation libs.wear.core
+    implementation libs.wear.phone
+    implementation libs.wear.remote
 
     implementation project(':muzei-api')
     implementation project(':extensions')

@@ -31,6 +31,7 @@ import net.nurik.roman.muzei.androidclientcommon.BuildConfig
 import java.io.FileNotFoundException
 import java.io.IOException
 import java.io.InputStream
+import kotlin.math.max
 
 fun InputStream.isValidImage(): Boolean {
     val options = BitmapFactory.Options().apply {
@@ -58,7 +59,7 @@ sealed class ImageLoader {
                 uri: Uri,
                 targetWidth: Int = 0,
                 targetHeight: Int = targetWidth
-        ) = withContext(Dispatchers.Default) {
+        ) = withContext(Dispatchers.IO) {
             ContentUriImageLoader(contentResolver, uri)
                     .decode(targetWidth, targetHeight)
         }
@@ -105,7 +106,7 @@ sealed class ImageLoader {
                         BitmapFactory.Options().apply {
                             inPreferredConfig = Bitmap.Config.ARGB_8888
                             if (targetWidth != 0) {
-                                inSampleSize = Math.max(
+                                inSampleSize = max(
                                         width.sampleSize(targetWidth),
                                         height.sampleSize(targetHeight))
                             }
@@ -136,21 +137,23 @@ sealed class ImageLoader {
         }
     }
 
-    private fun getRotation(): Int = try {
+    fun getRotation(): Int = try {
         openInputStream()?.use { input ->
             val exifInterface = ExifInterface(input)
-            val orientation = exifInterface.getAttributeInt(
-                    ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
-            when (orientation) {
+            when (exifInterface.getAttributeInt(ExifInterface.TAG_ORIENTATION,
+                    ExifInterface.ORIENTATION_NORMAL)) {
                 ExifInterface.ORIENTATION_ROTATE_90 -> 90
                 ExifInterface.ORIENTATION_ROTATE_180 -> 180
                 ExifInterface.ORIENTATION_ROTATE_270 -> 270
                 else -> 0
             }
-        }
+        } ?: 0
     } catch (e: Exception) {
-        Log.w(TAG, "Couldn't open EXIF interface for ${toString()}", e)
-    } ?: 0
+        if (BuildConfig.DEBUG) {
+            Log.w(TAG, "Couldn't open EXIF interface for ${toString()}", e)
+        }
+        0
+    }
 
     abstract fun openInputStream() : InputStream?
 }
@@ -158,7 +161,7 @@ sealed class ImageLoader {
 /**
  * An [ImageLoader] capable of loading images from a [ContentResolver]
  */
-class ContentUriImageLoader constructor(
+class ContentUriImageLoader(
         private val contentResolver: ContentResolver,
         private val uri: Uri
 ) : ImageLoader() {
@@ -175,13 +178,13 @@ class ContentUriImageLoader constructor(
 /**
  * An [ImageLoader] capable of loading images from [AssetManager]
  */
-class AssetImageLoader constructor(
+class AssetImageLoader(
         private val assetManager: AssetManager,
         private val fileName: String
 ) : ImageLoader() {
 
     @Throws(IOException::class)
-    override fun openInputStream(): InputStream? =
+    override fun openInputStream(): InputStream =
             assetManager.open(fileName)
 
     override fun toString(): String {

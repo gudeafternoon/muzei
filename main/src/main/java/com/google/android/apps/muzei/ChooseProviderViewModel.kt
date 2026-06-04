@@ -18,27 +18,26 @@ package com.google.android.apps.muzei
 
 import android.annotation.SuppressLint
 import android.app.Application
+import android.content.BroadcastReceiver
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.drawable.Drawable
 import android.net.Uri
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.LiveData
-import androidx.lifecycle.MutableLiveData
-import androidx.lifecycle.Observer
 import androidx.lifecycle.viewModelScope
-import com.google.android.apps.muzei.room.InstalledProvidersLiveData
+import com.google.android.apps.muzei.room.Artwork
 import com.google.android.apps.muzei.room.MuzeiDatabase
-import com.google.android.apps.muzei.room.Provider
+import com.google.android.apps.muzei.room.getInstalledProviders
 import com.google.android.apps.muzei.sync.ProviderManager
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.asCoroutineDispatcher
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import net.nurik.roman.muzei.BuildConfig.SOURCES_AUTHORITY
-import net.nurik.roman.muzei.R
-import java.util.concurrent.Executors
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 
 data class ProviderInfo(
         val authority: String,
@@ -54,9 +53,9 @@ data class ProviderInfo(
     constructor(
             packageManager: PackageManager,
             providerInfo: android.content.pm.ProviderInfo,
-            description: String?,
-            currentArtworkUri: Uri?,
-            selected: Boolean
+            description: String? = null,
+            currentArtworkUri: Uri? = null,
+            selected: Boolean = false
     ) : this(
                 providerInfo.authority,
                 providerInfo.packageName,
@@ -73,50 +72,13 @@ data class ProviderInfo(
                 selected)
 }
 
+@SuppressLint("WrongConstant")
 class ChooseProviderViewModel(application: Application) : AndroidViewModel(application) {
 
-    companion object {
-        private const val PLAY_STORE_PACKAGE_NAME = "com.android.vending"
-    }
-
-    private val currentProviders = HashMap<String, ProviderInfo>()
-    private var activeProvider : Provider? = null
-
-    private val singleThreadContext = Executors.newSingleThreadExecutor { target ->
-        Thread(target, "ChooseProvider")
-    }.asCoroutineDispatcher()
-
-    override fun onCleared() {
-        singleThreadContext.close()
-        super.onCleared()
-    }
-
-    @SuppressLint("InlinedApi")
-    val playStoreIntent: Intent = Intent(Intent.ACTION_VIEW,
-            Uri.parse("http://play.google.com/store/search?q=Muzei&c=apps" +
-                    "&referrer=utm_source%3Dmuzei" +
-                    "%26utm_medium%3Dapp" +
-                    "%26utm_campaign%3Dget_more_sources"))
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
-            .setPackage(PLAY_STORE_PACKAGE_NAME)
-    private val playStoreComponentName: ComponentName? = playStoreIntent.resolveActivity(
-            application.packageManager)
-    val playStoreAuthority: String? = if (playStoreComponentName != null) "play_store" else null
+    private val database = MuzeiDatabase.getInstance(application)
 
     private val comparator = Comparator<ProviderInfo> { p1, p2 ->
-        // Get More Sources should always be at the end of the list
-        if (p1.authority == playStoreAuthority) {
-            return@Comparator 1
-        } else if (p2.authority == playStoreAuthority) {
-            return@Comparator -1
-        }
-        // The SourceArtProvider should always the last provider listed
-        if (p1.authority == SOURCES_AUTHORITY) {
-            return@Comparator 1
-        } else if (p2.authority == SOURCES_AUTHORITY) {
-            return@Comparator -1
-        }
-        // Then put providers from Muzei on top
+        // Put providers from Muzei on top
         val pn1 = p1.packageName
         val pn2 = p2.packageName
         if (pn1 != pn2) {
@@ -130,128 +92,108 @@ class ChooseProviderViewModel(application: Application) : AndroidViewModel(appli
         p1.title.compareTo(p2.title)
     }
 
-    private suspend fun updateProviders(providerInfos: List<android.content.pm.ProviderInfo>) {
-        val context = getApplication<Application>()
-        val pm = context.packageManager
-        val newProviders = HashMap<String, ProviderInfo>().apply {
-            putAll(currentProviders)
+    /**
+     * The set of installed providers, transformed into a list of [ProviderInfo] objects
+     */
+    private val installedProviders = getInstalledProviders(application).map { providerInfos ->
+        val packageManager = application.packageManager
+        providerInfos.map { providerInfo ->
+            ProviderInfo(packageManager, providerInfo)
         }
-        val existingProviders = HashSet(currentProviders.values)
-        existingProviders.removeAll {
-            it.authority == playStoreAuthority
+    }
+
+    /**
+     * The authority of the current MuzeiArtProvider
+     */
+    private val currentProviderAuthority = database.providerDao().getCurrentProviderFlow()
+      .map { provider ->
+        provider?.authority
+    }
+
+    /**
+     * An authority to current artwork URI map
+     */
+    private val currentArtworkByProvider = database.artworkDao().getCurrentArtworkByProvider()
+      .map { artworkForProvider ->
+        val artworkMap = mutableMapOf<String, Artwork>()
+        artworkForProvider.forEach {  artwork ->
+            artworkMap[artwork.providerAuthority] = artwork
         }
-        for (providerInfo in providerInfos) {
+        artworkMap
+    }
+
+    /**
+     * An authority to description map used to avoid querying each
+     * MuzeiArtProvider every time.
+     */
+    private val descriptions = mutableMapOf<String, String>()
+    /**
+     * MutableStateFlow that should be updated with the current nano time
+     * when the descriptions are invalidated.
+     */
+    private val descriptionInvalidationNanoTime = MutableStateFlow(0L)
+
+    /**
+     * Combine all of the separate signals we have into one final set of [ProviderInfo]:
+     * - The set of installed providers
+     * - the currently selected provider
+     * - the current artwork for each provider
+     * - the input signal for when the descriptions have been invalidated (we don't
+     * care about the value, but we do want to recompute the [ProviderInfo] values)
+     */
+    val providers = combine(
+            installedProviders,
+            currentProviderAuthority,
+            currentArtworkByProvider,
+            descriptionInvalidationNanoTime
+    ) { installedProviders, providerAuthority, artworkForProvider, _ ->
+        installedProviders.map { providerInfo ->
             val authority = providerInfo.authority
-            existingProviders.removeAll { it.authority == authority }
-            val selected = authority == activeProvider?.authority
-            val description = ProviderManager.getDescription(context, authority)
-            val currentArtwork = MuzeiDatabase.getInstance(context).artworkDao()
-                    .getCurrentArtworkForProvider(authority)
-            newProviders[authority] = ProviderInfo(pm, providerInfo,
-                    description, currentArtwork?.imageUri, selected)
-        }
-        // Remove providers that weren't found in the providerInfos
-        existingProviders.forEach {
-            newProviders.remove(it.authority)
-        }
-        if (playStoreComponentName != null && playStoreAuthority != null &&
-                newProviders[playStoreAuthority] == null) {
-            newProviders[playStoreAuthority] = ProviderInfo(
-                    playStoreAuthority,
-                    playStoreComponentName.packageName,
-                    context.getString(R.string.get_more_sources),
-                    context.getString(R.string.get_more_sources_description),
-                    null,
-                    pm.getActivityLogo(playStoreIntent)
-                            ?: pm.getApplicationIcon(PLAY_STORE_PACKAGE_NAME),
-                    null,
-                    null,
-                    false)
-        }
-        currentProviders.clear()
-        currentProviders.putAll(newProviders)
-        mutableProviders.postValue(currentProviders.values.sortedWith(comparator))
-    }
-
-    private val mutableProviders : MutableLiveData<List<ProviderInfo>> = object : MutableLiveData<List<ProviderInfo>>() {
-        val allProvidersLiveData = InstalledProvidersLiveData(application,
-                viewModelScope)
-        val allProvidersObserver = Observer<List<android.content.pm.ProviderInfo>> { providerInfos ->
-            if (providerInfos != null) {
-                viewModelScope.launch(singleThreadContext) {
-                    updateProviders(providerInfos)
-                    withContext(Dispatchers.Main) {
-                        startObserving()
-                    }
-                }
+            val selected = authority == providerAuthority
+            val description = descriptions[authority] ?: run {
+                // Populate the description if we don't already have one
+                val newDescription = ProviderManager.getDescription(application, authority)
+                descriptions[authority] = newDescription
+                newDescription
             }
-        }
-        val currentProviderLiveData = MuzeiDatabase.getInstance(application).providerDao()
-                .currentProvider
-        val currentProviderObserver = Observer<Provider?> { provider ->
-            activeProvider = provider
-            if (provider != null) {
-                viewModelScope.launch(singleThreadContext) {
-                    currentProviders.forEach {
-                        val newlySelected = it.key == provider.authority
-                        if (it.value.selected != newlySelected) {
-                            currentProviders[it.key] = it.value.copy(selected = newlySelected)
-                        }
-                    }
-                    postValue(currentProviders.values.sortedWith(comparator))
-                }
-
-            }
-        }
-        val currentArtworkByProviderLiveData = MuzeiDatabase.getInstance(application).artworkDao()
-                .currentArtworkByProvider
-        val currentArtworkByProviderObserver = Observer<List<com.google.android.apps.muzei.room.Artwork>> { artworkByProvider ->
-            if (artworkByProvider != null) {
-                viewModelScope.launch(singleThreadContext) {
-                    val artworkMap = HashMap<String, Uri>()
-                    artworkByProvider.forEach { artwork ->
-                        artworkMap[artwork.providerAuthority] = artwork.imageUri
-                    }
-                    currentProviders.forEach {
-                        currentProviders[it.key] = it.value.copy(currentArtworkUri = artworkMap[it.key])
-                    }
-                    postValue(currentProviders.values.sortedWith(comparator))
-                }
-            }
-        }
-
-        override fun onActive() {
-            allProvidersLiveData.observeForever(allProvidersObserver)
-        }
-
-        fun startObserving() {
-            if (hasActiveObservers() && !currentArtworkByProviderLiveData.hasObservers()) {
-                currentProviderLiveData.observeForever(currentProviderObserver)
-                currentArtworkByProviderLiveData.observeForever(currentArtworkByProviderObserver)
-            }
-        }
-
-        override fun onInactive() {
-            if (currentArtworkByProviderLiveData.hasObservers()) {
-                currentArtworkByProviderLiveData.removeObserver(currentArtworkByProviderObserver)
-                currentProviderLiveData.removeObserver(currentProviderObserver)
-            }
-            allProvidersLiveData.removeObserver(allProvidersObserver)
-        }
-    }
-
-    val providers : LiveData<List<ProviderInfo>> = mutableProviders
+            val currentArtwork = artworkForProvider[authority]
+            providerInfo.copy(
+                    selected = selected,
+                    description = description,
+                    currentArtworkUri = currentArtwork?.imageUri
+            )
+        }.sortedWith(comparator)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
 
     internal fun refreshDescription(authority: String) {
-        viewModelScope.launch {
-            val updatedDescription = ProviderManager.getDescription(getApplication(), authority)
-            currentProviders[authority]?.let { providerInfo ->
-                if (providerInfo.description != updatedDescription) {
-                    currentProviders[authority] =
-                            providerInfo.copy(description = updatedDescription)
-                    mutableProviders.postValue(currentProviders.values.sortedWith(comparator))
-                }
-            }
+        // Remove the current description and trigger the invalidation
+        // to recompute the description
+        descriptions.remove(authority)
+        descriptionInvalidationNanoTime.value = System.nanoTime()
+    }
+
+    private val localeChangeReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            // Our cached descriptions need to be invalidated when the locale changes
+            // so that we re-query for descriptions in the new language
+            descriptions.clear()
+            descriptionInvalidationNanoTime.value = System.nanoTime()
         }
+    }
+
+    init {
+        ContextCompat.registerReceiver(
+            application,
+            localeChangeReceiver,
+            IntentFilter().apply {
+                addAction(Intent.ACTION_LOCALE_CHANGED)
+            },
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        getApplication<Application>().unregisterReceiver(localeChangeReceiver)
     }
 }

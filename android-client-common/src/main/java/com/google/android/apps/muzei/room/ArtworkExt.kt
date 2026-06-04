@@ -14,24 +14,41 @@
  * limitations under the License.
  */
 
+@file:Suppress("DEPRECATION")
+
 package com.google.android.apps.muzei.room
 
+import android.app.PendingIntent
 import android.content.Context
-import android.os.Bundle
 import android.os.RemoteException
 import android.util.Log
-import com.google.android.apps.muzei.api.MuzeiContract
+import androidx.core.app.RemoteActionCompat
+import androidx.core.graphics.drawable.IconCompat
+import androidx.core.os.bundleOf
+import androidx.versionedparcelable.ParcelUtils
+import com.google.android.apps.muzei.api.BuildConfig.API_VERSION
 import com.google.android.apps.muzei.api.UserCommand
-import com.google.android.apps.muzei.api.internal.ProtocolConstants.KEY_COMMAND
+import com.google.android.apps.muzei.api.internal.ProtocolConstants.DEFAULT_VERSION
+import com.google.android.apps.muzei.api.internal.ProtocolConstants.GET_ARTWORK_INFO_MIN_VERSION
 import com.google.android.apps.muzei.api.internal.ProtocolConstants.KEY_COMMANDS
+import com.google.android.apps.muzei.api.internal.ProtocolConstants.KEY_GET_ARTWORK_INFO
 import com.google.android.apps.muzei.api.internal.ProtocolConstants.KEY_OPEN_ARTWORK_INFO_SUCCESS
+import com.google.android.apps.muzei.api.internal.ProtocolConstants.KEY_VERSION
+import com.google.android.apps.muzei.api.internal.ProtocolConstants.METHOD_GET_ARTWORK_INFO
 import com.google.android.apps.muzei.api.internal.ProtocolConstants.METHOD_GET_COMMANDS
+import com.google.android.apps.muzei.api.internal.ProtocolConstants.METHOD_GET_VERSION
 import com.google.android.apps.muzei.api.internal.ProtocolConstants.METHOD_OPEN_ARTWORK_INFO
-import com.google.android.apps.muzei.api.internal.ProtocolConstants.METHOD_TRIGGER_COMMAND
+import com.google.android.apps.muzei.api.internal.RemoteActionBroadcastReceiver
 import com.google.android.apps.muzei.util.ContentProviderClientCompat
-import com.google.android.apps.muzei.util.toastFromBackground
+import com.google.android.apps.muzei.util.getParcelableCompat
+import com.google.android.apps.muzei.util.sendFromBackground
+import com.google.android.apps.muzei.util.toast
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import net.nurik.roman.muzei.androidclientcommon.R
-import java.util.ArrayList
+import org.json.JSONArray
+import org.json.JSONException
+import com.google.android.apps.muzei.api.R as ApiR
 
 private const val TAG = "Artwork"
 
@@ -39,41 +56,77 @@ suspend fun Artwork.openArtworkInfo(context: Context) {
     val success = ContentProviderClientCompat.getClient(
             context, imageUri)?.use { client ->
         try {
-            val result = client.call(METHOD_OPEN_ARTWORK_INFO, imageUri.toString())
-            result?.getBoolean(KEY_OPEN_ARTWORK_INFO_SUCCESS)
+            val versionResult = client.call(METHOD_GET_VERSION)
+            val version = versionResult?.getInt(KEY_VERSION) ?: DEFAULT_VERSION
+            if (version >= GET_ARTWORK_INFO_MIN_VERSION) {
+                val result = client.call(METHOD_GET_ARTWORK_INFO, imageUri.toString())
+                val artworkInfo = result?.getParcelableCompat<PendingIntent>(KEY_GET_ARTWORK_INFO)
+                try {
+                    artworkInfo?.run {
+                        sendFromBackground()
+                        true
+                    } ?: false
+                } catch (e: PendingIntent.CanceledException) {
+                    Log.w(TAG, "Provider for $imageUri returned a cancelled " +
+                            "PendingIntent: $artworkInfo", e)
+                    false
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to send() the PendingIntent $artworkInfo for $imageUri", e)
+                    false
+                }
+            } else {
+                val result = client.call(METHOD_OPEN_ARTWORK_INFO, imageUri.toString())
+                result?.getBoolean(KEY_OPEN_ARTWORK_INFO_SUCCESS)
+            }
         } catch (e: RemoteException) {
             Log.i(TAG, "Provider for $imageUri crashed while opening artwork info", e)
             false
         }
     } ?: false
     if (!success) {
-        context.toastFromBackground(R.string.error_view_details)
+        withContext(Dispatchers.Main.immediate) {
+            context.toast(R.string.error_view_details)
+        }
     }
 }
 
-suspend fun Artwork.getCommands(context: Context) : List<UserCommand> {
+suspend fun Artwork.getCommands(context: Context) : List<RemoteActionCompat> {
     return ContentProviderClientCompat.getClient(context, imageUri)?.use { client ->
-        return try {
-            val result = client.call(METHOD_GET_COMMANDS, imageUri.toString())
-            val commandsString = result?.getString(KEY_COMMANDS, null)
-            MuzeiContract.Sources.parseCommands(commandsString)
+        try {
+            val result = client.call(METHOD_GET_COMMANDS, imageUri.toString(),
+                    bundleOf(KEY_VERSION to API_VERSION))
+                    ?: return ArrayList()
+            val extensionVersion = result.getInt(KEY_VERSION, DEFAULT_VERSION)
+            if (extensionVersion >= GET_ARTWORK_INFO_MIN_VERSION) {
+                ParcelUtils.getVersionedParcelableList(result, KEY_COMMANDS) ?: ArrayList()
+            } else {
+                result.getString(KEY_COMMANDS, null)?.run {
+                    val commands = mutableListOf<UserCommand>()
+                    try {
+                        val commandArray = JSONArray(this)
+                        for (index in 0 until commandArray.length()) {
+                            commands.add(UserCommand.deserialize(commandArray.getString(index)))
+                        }
+                    } catch (e: JSONException) {
+                        Log.e(TAG, "Error parsing commands from $this", e)
+                    }
+                    commands.map { command ->
+                        RemoteActionCompat(
+                                IconCompat.createWithResource(context, ApiR.drawable.muzei_launch_command),
+                                command.title ?: "",
+                                command.title ?: "",
+                                RemoteActionBroadcastReceiver.createPendingIntent(context,
+                                        providerAuthority, id, command.id)).apply {
+                            setShouldShowIcon(false)
+                        }
+                    }
+                } ?: ArrayList()
+            }
         } catch (e: RemoteException) {
             Log.i(TAG, "Provider for $imageUri crashed while retrieving commands", e)
             ArrayList()
         }
-    } ?: ArrayList<UserCommand>().also {
+    } ?: ArrayList<RemoteActionCompat>().also {
         Log.i(TAG, "Could not connect to provider for $imageUri while retrieving commands")
-    }
-}
-
-suspend fun Artwork.sendAction(context: Context, id: Int) {
-    ContentProviderClientCompat.getClient(context, imageUri)?.use { client ->
-        try {
-            client.call(METHOD_TRIGGER_COMMAND,
-                    imageUri.toString(),
-                    Bundle().apply { putInt(KEY_COMMAND, id) })
-        } catch (e: RemoteException) {
-            Log.i(TAG, "Provider for $imageUri crashed while sending action", e)
-        }
     }
 }

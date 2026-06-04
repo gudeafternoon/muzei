@@ -16,26 +16,18 @@
 
 package com.google.android.apps.muzei.datalayer
 
+import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.support.wearable.activity.ConfirmationActivity
-import android.util.Log
+import androidx.core.app.RemoteActionCompat
+import androidx.core.graphics.drawable.IconCompat
 import com.google.android.apps.muzei.api.provider.Artwork
 import com.google.android.apps.muzei.api.provider.MuzeiArtProvider
-import com.google.android.apps.muzei.util.toastFromBackground
-import com.google.android.gms.tasks.Tasks
-import com.google.android.gms.wearable.CapabilityClient
-import com.google.android.gms.wearable.CapabilityInfo
-import com.google.android.gms.wearable.Node
-import com.google.android.gms.wearable.Wearable
-import com.google.firebase.analytics.FirebaseAnalytics
 import net.nurik.roman.muzei.R
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileNotFoundException
 import java.io.InputStream
-import java.util.TreeSet
-import java.util.concurrent.ExecutionException
 
 /**
  * Provider handling art from a connected phone
@@ -43,67 +35,31 @@ import java.util.concurrent.ExecutionException
 class DataLayerArtProvider : MuzeiArtProvider() {
 
     companion object {
-        private const val TAG = "DataLayerArtProvider"
-        const val OPEN_ON_PHONE_ACTION = 1
-
         fun getAssetFile(context: Context): File =
                 File(context.filesDir, "data_layer")
     }
 
     override fun onLoadRequested(initial: Boolean) {
+        val context = context ?: return
         if (initial) {
-            DataLayerLoadWorker.enqueueLoad()
+            DataLayerLoadWorker.enqueueLoad(context)
         }
     }
 
-    override fun onCommand(artwork: Artwork, id: Int) {
-        val context = context ?: return
-        when(id) {
-            OPEN_ON_PHONE_ACTION -> {
-                // Open on Phone action
-                val capabilityClient = Wearable.getCapabilityClient(context)
-                val nodes: Set<Node> = try {
-                    // We use activate_muzei for compatibility with
-                    // older versions of Muzei's phone app
-                    Tasks.await<CapabilityInfo>(capabilityClient.getCapability(
-                            "activate_muzei", CapabilityClient.FILTER_REACHABLE)).nodes
-                } catch (e: ExecutionException) {
-                    Log.e(TAG, "Error getting reachable capability info", e)
-                    TreeSet()
-                } catch (e: InterruptedException) {
-                    Log.e(TAG, "Error getting reachable capability info", e)
-                    TreeSet()
-                }
+    override fun getCommandActions(artwork: Artwork): List<RemoteActionCompat> {
+        val context = context ?: return super.getCommandActions(artwork)
+        return listOf(createOpenOnPhoneAction(context))
+    }
 
-                if (nodes.isEmpty()) {
-                    context.toastFromBackground(R.string.datalayer_open_failed)
-                } else {
-                    FirebaseAnalytics.getInstance(context).logEvent("data_layer_open_on_phone", null)
-                    // Show the open on phone animation
-                    val openOnPhoneIntent = Intent(context, ConfirmationActivity::class.java).apply {
-                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                        putExtra(ConfirmationActivity.EXTRA_ANIMATION_TYPE,
-                                ConfirmationActivity.OPEN_ON_PHONE_ANIMATION)
-                    }
-                    context.startActivity(openOnPhoneIntent)
-                    // Send the message to the phone to open Muzei
-                    val messageClient = Wearable.getMessageClient(context)
-                    for (node in nodes) {
-                        try {
-                            // We use notification/open for compatibility with
-                            // older versions of Muzei's phone app
-                            Tasks.await(messageClient.sendMessage(node.id,
-                                    "notification/open", null))
-                        } catch (e: ExecutionException) {
-                            Log.w(TAG, "Unable to send Open on phone message to ${node.id}", e)
-                        } catch (e: InterruptedException) {
-                            Log.w(TAG, "Unable to send Open on phone message to ${node.id}", e)
-                        }
-                    }
-                }
-            }
-            else -> super.onCommand(artwork, id)
-        }
+    private fun createOpenOnPhoneAction(context: Context): RemoteActionCompat {
+        val title = context.getString(R.string.open_on_phone)
+        val intent = Intent(context, OpenOnPhoneReceiver::class.java)
+        return RemoteActionCompat(
+                IconCompat.createWithResource(context, R.drawable.open_on_phone_button),
+                title,
+                title,
+                PendingIntent.getBroadcast(context, 0, intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
     }
 
     @Throws(FileNotFoundException::class)

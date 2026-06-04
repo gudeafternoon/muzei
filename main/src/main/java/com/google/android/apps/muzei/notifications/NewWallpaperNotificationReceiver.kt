@@ -16,35 +16,41 @@
 
 package com.google.android.apps.muzei.notifications
 
-import android.app.NotificationChannel
-import android.app.NotificationManager
+import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.res.Resources
+import android.graphics.Bitmap
 import android.os.Build
-import android.preference.PreferenceManager
 import android.provider.Settings
 import android.util.Log
-import androidx.annotation.RequiresApi
+import androidx.core.app.NotificationChannelCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.RemoteInput
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
-import androidx.core.os.bundleOf
-import com.google.android.apps.muzei.ArtDetailOpenLiveData
+import androidx.preference.PreferenceManager
+import androidx.savedstate.savedState
+import com.google.android.apps.muzei.ArtDetailOpen
 import com.google.android.apps.muzei.ArtworkInfoRedirectActivity
 import com.google.android.apps.muzei.render.ContentUriImageLoader
 import com.google.android.apps.muzei.room.MuzeiDatabase
+import com.google.android.apps.muzei.room.contentUri
 import com.google.android.apps.muzei.room.getCommands
-import com.google.android.apps.muzei.room.sendAction
-import com.google.android.apps.muzei.sources.SourceManager
-import com.google.android.apps.muzei.sources.allowsNextArtwork
+import com.google.android.apps.muzei.sync.ProviderManager
 import com.google.android.apps.muzei.util.goAsync
+import com.google.android.apps.muzei.util.sendFromBackground
+import com.google.firebase.Firebase
 import com.google.firebase.analytics.FirebaseAnalytics
+import com.google.firebase.analytics.analytics
+import com.google.firebase.analytics.logEvent
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import net.nurik.roman.muzei.R
+import net.nurik.roman.muzei.androidclientcommon.R as CommonR
 
 class NewWallpaperNotificationReceiver : BroadcastReceiver() {
 
@@ -52,7 +58,7 @@ class NewWallpaperNotificationReceiver : BroadcastReceiver() {
         const val PREF_ENABLED = "new_wallpaper_notification_enabled"
         private const val PREF_LAST_READ_NOTIFICATION_ARTWORK_ID = "last_read_notification_artwork_id"
 
-        internal const val NOTIFICATION_CHANNEL = "new_wallpaper"
+        private const val NOTIFICATION_CHANNEL = "new_wallpaper"
         private const val NOTIFICATION_ID = 1234
 
         private const val ACTION_MARK_NOTIFICATION_READ = "com.google.android.apps.muzei.action.NOTIFICATION_DELETED"
@@ -88,19 +94,19 @@ class NewWallpaperNotificationReceiver : BroadcastReceiver() {
                     // we've also posted the 'Review your settings' notification
                     return false
                 }
-                val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager?
-                        ?: return false
+                val notificationManager = NotificationManagerCompat.from(context)
                 val channel = notificationManager
-                        .getNotificationChannel(NOTIFICATION_CHANNEL)
-                return channel != null && channel.importance != NotificationManager.IMPORTANCE_NONE
+                        .getNotificationChannelCompat(NOTIFICATION_CHANNEL)
+                return channel != null && channel.importance != NotificationManagerCompat.IMPORTANCE_NONE
             }
             // Prior to O, we maintain our own preference
             val sp = PreferenceManager.getDefaultSharedPreferences(context)
             return sp.getBoolean(PREF_ENABLED, true)
         }
 
+        @SuppressLint("InlinedApi")
         suspend fun maybeShowNewArtworkNotification(context: Context) {
-            if (ArtDetailOpenLiveData.value == true) {
+            if (ArtDetailOpen.value) {
                 return
             }
 
@@ -129,40 +135,40 @@ class NewWallpaperNotificationReceiver : BroadcastReceiver() {
             val largeIconHeight = context.resources
                     .getDimensionPixelSize(android.R.dimen.notification_large_icon_height)
             val imageLoader = ContentUriImageLoader(contentResolver, artwork.contentUri)
-            val largeIcon = imageLoader.decode(largeIconHeight) ?: return
-            val bigPicture = imageLoader.decode(400) ?: return
+            val largeIcon = withContext(Dispatchers.IO) { imageLoader.decode(largeIconHeight) } ?: return
+            val bigPicture = withContext(Dispatchers.IO) { imageLoader.decode(400) } ?: return
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                createNotificationChannel(context)
-            }
+            createNotificationChannel(context)
 
             try {
-                ContextCompat.getDrawable(context, R.drawable.ic_stat_muzei)
+                ContextCompat.getDrawable(context, CommonR.drawable.ic_stat_muzei)
             } catch (e : Resources.NotFoundException) {
                 Log.e("Notification", "Invalid installation: " +
                         "missing notification icon", e)
                 return
             }
+            val launchIntent = withContext(Dispatchers.IO) {
+                context.packageManager.getLaunchIntentForPackage(context.packageName)
+            }
             val artworkTitle = artwork.title
             val title = artworkTitle?.takeUnless { it.isEmpty() }
-                    ?: context.getString(R.string.app_name)
+                    ?: context.getString(CommonR.string.app_name)
             val nb = NotificationCompat.Builder(context, NOTIFICATION_CHANNEL)
-                    .setSmallIcon(R.drawable.ic_stat_muzei)
-                    .setColor(ContextCompat.getColor(context, R.color.notification))
+                    .setSmallIcon(CommonR.drawable.ic_stat_muzei)
+                    .setColor(ContextCompat.getColor(context, CommonR.color.notification))
                     .setPriority(NotificationCompat.PRIORITY_MIN)
                     .setAutoCancel(true)
                     .setContentTitle(title)
                     .setContentText(context.getString(R.string.notification_new_wallpaper))
                     .setLargeIcon(largeIcon)
-                    .setContentIntent(PendingIntent.getActivity(context, 0,
-                            context.packageManager.getLaunchIntentForPackage(context.packageName),
-                            PendingIntent.FLAG_UPDATE_CURRENT))
+                    .setContentIntent(PendingIntent.getActivity(context, 0, launchIntent,
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
                     .setDeleteIntent(PendingIntent.getBroadcast(context, 0,
                             Intent(context, NewWallpaperNotificationReceiver::class.java)
                                     .setAction(ACTION_MARK_NOTIFICATION_READ),
-                            PendingIntent.FLAG_UPDATE_CURRENT))
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
             val style = NotificationCompat.BigPictureStyle()
-                    .bigLargeIcon(null)
+                    .bigLargeIcon(null as Bitmap?)
                     .setBigContentTitle(title)
                     .setSummaryText(artwork.byline)
                     .bigPicture(bigPicture)
@@ -171,11 +177,11 @@ class NewWallpaperNotificationReceiver : BroadcastReceiver() {
             val extender = NotificationCompat.WearableExtender()
 
             // Support Next Artwork
-            if (provider.allowsNextArtwork(context)) {
+            if (provider.supportsNextArtwork) {
                 val nextPendingIntent = PendingIntent.getBroadcast(context, 0,
                         Intent(context, NewWallpaperNotificationReceiver::class.java)
                                 .setAction(ACTION_NEXT_ARTWORK),
-                        PendingIntent.FLAG_UPDATE_CURRENT)
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
                 val nextAction = NotificationCompat.Action.Builder(
                         R.drawable.ic_notif_next_artwork,
                         context.getString(R.string.action_next_artwork_condensed),
@@ -188,12 +194,12 @@ class NewWallpaperNotificationReceiver : BroadcastReceiver() {
             }
             val commands = artwork.getCommands(context)
             // Show custom actions as a selectable list on Android Wear devices
-            if (!commands.isEmpty()) {
+            if (commands.isNotEmpty()) {
                 val actions = commands.map { it.title }.toTypedArray()
                 val userCommandPendingIntent = PendingIntent.getBroadcast(context, 0,
                         Intent(context, NewWallpaperNotificationReceiver::class.java)
                                 .setAction(ACTION_USER_COMMAND),
-                        PendingIntent.FLAG_UPDATE_CURRENT)
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE)
                 val remoteInput = RemoteInput.Builder(EXTRA_USER_COMMAND)
                         .setAllowFreeFormInput(false)
                         .setLabel(context.getString(R.string.action_user_command_prompt))
@@ -208,7 +214,7 @@ class NewWallpaperNotificationReceiver : BroadcastReceiver() {
             }
             val viewPendingIntent = PendingIntent.getActivity(context, 0,
                     ArtworkInfoRedirectActivity.getIntent(context, "notification"),
-                    PendingIntent.FLAG_UPDATE_CURRENT)
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
             val viewAction = NotificationCompat.Action.Builder(
                     R.drawable.ic_notif_info,
                     context.getString(R.string.action_artwork_info),
@@ -221,19 +227,18 @@ class NewWallpaperNotificationReceiver : BroadcastReceiver() {
 
             // Hide the image and artwork title for the public version
             val publicBuilder = NotificationCompat.Builder(context, NOTIFICATION_CHANNEL)
-                    .setSmallIcon(R.drawable.ic_stat_muzei)
-                    .setColor(ContextCompat.getColor(context, R.color.notification))
+                    .setSmallIcon(CommonR.drawable.ic_stat_muzei)
+                    .setColor(ContextCompat.getColor(context, CommonR.color.notification))
                     .setPriority(NotificationCompat.PRIORITY_MIN)
                     .setAutoCancel(true)
-                    .setContentTitle(context.getString(R.string.app_name))
+                    .setContentTitle(context.getString(CommonR.string.app_name))
                     .setContentText(context.getString(R.string.notification_new_wallpaper))
-                    .setContentIntent(PendingIntent.getActivity(context, 0,
-                            context.packageManager.getLaunchIntentForPackage(context.packageName),
-                            PendingIntent.FLAG_UPDATE_CURRENT))
+                    .setContentIntent(PendingIntent.getActivity(context, 0, launchIntent,
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
                     .setDeleteIntent(PendingIntent.getBroadcast(context, 0,
                             Intent(context, NewWallpaperNotificationReceiver::class.java)
                                     .setAction(ACTION_MARK_NOTIFICATION_READ),
-                            PendingIntent.FLAG_UPDATE_CURRENT))
+                        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
             nb.setPublicVersion(publicBuilder.build())
 
             val nm = NotificationManagerCompat.from(context)
@@ -250,42 +255,39 @@ class NewWallpaperNotificationReceiver : BroadcastReceiver() {
          * @return False only in the case where the user had wallpapers disabled in-app, but has not
          * yet seen the 'Review your notification settings' notification
          */
-        @RequiresApi(Build.VERSION_CODES.O)
         internal fun createNotificationChannel(context: Context): Boolean {
-            val notificationManager = context.getSystemService(NotificationManager::class.java)
-                    ?: return false
+            val notificationManager = NotificationManagerCompat.from(context)
             val sp = PreferenceManager.getDefaultSharedPreferences(context)
             // On O+ devices, we want to push users to change the system notification setting
             // but we'll use their current value to set the default importance
             val defaultImportance = if (sp.getBoolean(PREF_ENABLED, true))
-                NotificationManager.IMPORTANCE_MIN
+                NotificationManagerCompat.IMPORTANCE_MIN
             else
-                NotificationManager.IMPORTANCE_NONE
-            if (sp.contains(PREF_ENABLED)) {
+                NotificationManagerCompat.IMPORTANCE_NONE
+            if (sp.contains(PREF_ENABLED) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 sp.edit { remove(PREF_ENABLED) }
-                if (defaultImportance == NotificationManager.IMPORTANCE_NONE) {
+                if (defaultImportance == NotificationManagerCompat.IMPORTANCE_NONE) {
                     // Check to see if there was already a channel and give users an
                     // easy way to review their notification settings if they had
                     // previously disabled notifications but have not yet disabled
                     // the channel
                     val existingChannel = notificationManager
-                            .getNotificationChannel(NOTIFICATION_CHANNEL)
-                    if (existingChannel != null && existingChannel.importance != NotificationManager.IMPORTANCE_NONE) {
+                            .getNotificationChannelCompat(NOTIFICATION_CHANNEL)
+                    if (existingChannel != null && existingChannel.importance != NotificationManagerCompat.IMPORTANCE_NONE) {
                         // Construct an Intent to get to the notification settings screen
                         val settingsIntent = Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
                         settingsIntent.putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-                        settingsIntent.putExtra(Settings.EXTRA_CHANNEL_ID,
-                                NewWallpaperNotificationReceiver.NOTIFICATION_CHANNEL)
+                        settingsIntent.putExtra(Settings.EXTRA_CHANNEL_ID, NOTIFICATION_CHANNEL)
                         // Build the notification
                         val builder = NotificationCompat.Builder(context, NOTIFICATION_CHANNEL)
-                                .setSmallIcon(R.drawable.ic_stat_muzei)
-                                .setColor(ContextCompat.getColor(context, R.color.notification))
+                                .setSmallIcon(CommonR.drawable.ic_stat_muzei)
+                                .setColor(ContextCompat.getColor(context, CommonR.color.notification))
                                 .setAutoCancel(true)
                                 .setContentTitle(context.getText(R.string.notification_settings_moved_title))
                                 .setContentText(context.getText(R.string.notification_settings_moved_text))
                                 .setContentIntent(PendingIntent.getActivity(context, 0,
                                         settingsIntent,
-                                        PendingIntent.FLAG_UPDATE_CURRENT))
+                                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
                                 .setStyle(NotificationCompat.BigTextStyle()
                                         .bigText(context.getText(R.string.notification_settings_moved_text)))
                         notificationManager.notify(1, builder.build())
@@ -293,10 +295,11 @@ class NewWallpaperNotificationReceiver : BroadcastReceiver() {
                     }
                 }
             }
-            val channel = NotificationChannel(NOTIFICATION_CHANNEL,
-                    context.getString(R.string.notification_new_wallpaper_channel_name),
+            val channel = NotificationChannelCompat.Builder(NOTIFICATION_CHANNEL,
                     defaultImportance)
-            channel.setShowBadge(false)
+                    .setName(context.getString(R.string.notification_new_wallpaper_channel_name))
+                    .setShowBadge(false)
+                    .build()
             notificationManager.createNotificationChannel(channel)
             return true
         }
@@ -307,10 +310,11 @@ class NewWallpaperNotificationReceiver : BroadcastReceiver() {
             when (intent?.action) {
                 ACTION_MARK_NOTIFICATION_READ -> markNotificationRead(context)
                 ACTION_NEXT_ARTWORK -> {
-                    FirebaseAnalytics.getInstance(context).logEvent(
-                            "next_artwork", bundleOf(
-                            FirebaseAnalytics.Param.CONTENT_TYPE to "notification"))
-                    SourceManager.nextArtwork(context)
+                    Firebase.analytics.logEvent(
+                        "next_artwork", savedState {
+                            putString(FirebaseAnalytics.Param.CONTENT_TYPE, "notification")
+                        })
+                    ProviderManager.getInstance(context).nextArtwork()
                 }
                 ACTION_USER_COMMAND -> triggerUserCommandFromRemoteInput(context, intent)
             }
@@ -326,13 +330,18 @@ class NewWallpaperNotificationReceiver : BroadcastReceiver() {
             if (artwork != null) {
                 val commands = artwork.getCommands(context)
                 commands.find { selectedCommand == it.title }?.run {
-                    FirebaseAnalytics.getInstance(context).logEvent(
-                            FirebaseAnalytics.Event.SELECT_CONTENT, bundleOf(
-                            FirebaseAnalytics.Param.ITEM_ID to id,
-                            FirebaseAnalytics.Param.ITEM_NAME to title,
-                            FirebaseAnalytics.Param.ITEM_CATEGORY to "actions",
-                            FirebaseAnalytics.Param.CONTENT_TYPE to "notification"))
-                    artwork.sendAction(context, id)
+                    Firebase.analytics.logEvent(FirebaseAnalytics.Event.SELECT_ITEM) {
+                        param(FirebaseAnalytics.Param.ITEM_LIST_ID, artwork.providerAuthority)
+                        param(FirebaseAnalytics.Param.ITEM_NAME, title.toString())
+                        param(FirebaseAnalytics.Param.ITEM_LIST_NAME, "actions")
+                        param(FirebaseAnalytics.Param.CONTENT_TYPE, "notification")
+                    }
+                    try {
+                        actionIntent.sendFromBackground()
+                    } catch (_: PendingIntent.CanceledException) {
+                        // Why do you give us a cancelled PendingIntent.
+                        // We can't do anything with that.
+                    }
                 }
             }
     }

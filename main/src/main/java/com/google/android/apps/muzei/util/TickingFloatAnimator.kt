@@ -19,6 +19,7 @@ package com.google.android.apps.muzei.util
 import android.animation.TimeInterpolator
 import android.os.SystemClock
 import android.view.animation.AccelerateDecelerateInterpolator
+import kotlin.math.min
 
 // Non thread-safe
 class TickingFloatAnimator(private val duration: Int) {
@@ -43,12 +44,19 @@ class TickingFloatAnimator(private val duration: Int) {
         tick()
     }
 
+    fun finish() {
+        if (isRunning) {
+            isRunning = false
+            currentValue = endValue.toFloat().also { onEnd() }
+        }
+    }
+
     fun tick(): Boolean {
         if (!isRunning) {
             return false
         }
 
-        val t = Math.min((SystemClock.elapsedRealtime() - startTime).toFloat() / duration, 1f)
+        val t = min((SystemClock.elapsedRealtime() - startTime).toFloat() / duration, 1f)
 
         isRunning = t < 1f
         currentValue = if (isRunning) {

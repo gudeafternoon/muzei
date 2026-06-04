@@ -16,6 +16,7 @@
 
 package com.google.android.apps.muzei.widget
 
+import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.appwidget.AppWidgetManager
 import android.content.ComponentName
@@ -23,22 +24,26 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.os.Build
+import android.os.Bundle
 import android.util.Log
 import android.util.TypedValue
 import android.view.View
 import android.widget.RemoteViews
 import androidx.annotation.LayoutRes
 import androidx.annotation.RequiresApi
-import androidx.core.os.bundleOf
 import com.google.android.apps.muzei.render.ImageLoader
 import com.google.android.apps.muzei.room.Artwork
 import com.google.android.apps.muzei.room.MuzeiDatabase
 import com.google.android.apps.muzei.room.Provider
-import com.google.android.apps.muzei.sources.allowsNextArtwork
+import com.google.android.apps.muzei.room.contentUri
 import com.google.android.apps.muzei.wallpaper.WallpaperActiveState
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import net.nurik.roman.muzei.R
+import kotlin.math.max
+import kotlin.math.min
 
 private const val TAG = "updateAppWidget"
 
@@ -63,10 +68,12 @@ suspend fun showWidgetPreview(context: Context) {
             context.resources.getDimensionPixelSize(R.dimen.widget_min_width),
             context.resources.getDimensionPixelSize(R.dimen.widget_min_height))
             ?: return
-    val extras = bundleOf(AppWidgetManager.EXTRA_APPWIDGET_PREVIEW to remoteViews)
+    val extras = Bundle().apply {
+        putParcelable(AppWidgetManager.EXTRA_APPWIDGET_PREVIEW, remoteViews)
+    }
     try {
         appWidgetManager.requestPinAppWidget(widget, extras, null)
-    } catch (ignored: IllegalStateException) {
+    } catch (_: IllegalStateException) {
         // The user exited out of the app before we could pop up the pin widget dialog
     }
 }
@@ -77,7 +84,13 @@ suspend fun showWidgetPreview(context: Context) {
 suspend fun updateAppWidget(context: Context) = coroutineScope {
     val widget = ComponentName(context, MuzeiAppWidgetProvider::class.java)
     val appWidgetManager = AppWidgetManager.getInstance(context) ?: return@coroutineScope
-    val appWidgetIds = appWidgetManager.getAppWidgetIds(widget)
+    val appWidgetIds = withContext(Dispatchers.IO) {
+        try {
+            appWidgetManager.getAppWidgetIds(widget)
+        } catch (_: Exception) {
+            intArrayOf()
+        }
+    }
     if (appWidgetIds.isEmpty()) {
         // No app widgets, nothing to do
         return@coroutineScope
@@ -96,10 +109,10 @@ suspend fun updateAppWidget(context: Context) = coroutineScope {
             val extras = appWidgetManager.getAppWidgetOptions(widgetId)
             var widgetWidth = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP,
                     extras.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH).toFloat(), displayMetrics).toInt()
-            widgetWidth = Math.max(Math.min(widgetWidth, displayMetrics.widthPixels), minWidgetSize)
+            widgetWidth = max(min(widgetWidth, displayMetrics.widthPixels), minWidgetSize)
             var widgetHeight = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP,
                     extras.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT).toFloat(), displayMetrics).toInt()
-            widgetHeight = Math.max(Math.min(widgetHeight, displayMetrics.heightPixels), minWidgetSize)
+            widgetHeight = max(min(widgetHeight, displayMetrics.heightPixels), minWidgetSize)
             var success = false
             while (!success) {
                 val remoteViews = createRemoteViews(context, provider, artwork,
@@ -108,7 +121,7 @@ suspend fun updateAppWidget(context: Context) = coroutineScope {
                 try {
                     appWidgetManager.updateAppWidget(widgetId, remoteViews)
                     success = true
-                } catch (e: IllegalArgumentException) {
+                } catch (_: IllegalArgumentException) {
                     Log.w(TAG, "App widget size $widgetWidth x $widgetHeight exceeded maximum memory, reducing quality")
                     widgetWidth /= 2
                     widgetHeight /= 2
@@ -118,6 +131,7 @@ suspend fun updateAppWidget(context: Context) = coroutineScope {
     }
 }
 
+@SuppressLint("InlinedApi")
 private suspend fun createRemoteViews(
         context: Context,
         provider: Provider,
@@ -127,27 +141,28 @@ private suspend fun createRemoteViews(
 ): RemoteViews? {
     val contentDescription = artwork.title ?: artwork.byline ?: ""
     val imageUri = artwork.contentUri
-    val supportsNextArtwork = WallpaperActiveState.value == true &&
-            provider.allowsNextArtwork(context)
+    val supportsNextArtwork = WallpaperActiveState.value && provider.supportsNextArtwork
 
     // Update the widget(s) with the new artwork information
     val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)
-    val launchPendingIntent = PendingIntent.getActivity(context,
-            0, launchIntent, PendingIntent.FLAG_UPDATE_CURRENT)
+    val launchPendingIntent = PendingIntent.getActivity(
+        context, 0, launchIntent,
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     val nextArtworkIntent = Intent(context, MuzeiAppWidgetProvider::class.java).apply {
         action = MuzeiAppWidgetProvider.ACTION_NEXT_ARTWORK
     }
-    val nextArtworkPendingIntent = PendingIntent.getBroadcast(context,
-            0, nextArtworkIntent, PendingIntent.FLAG_UPDATE_CURRENT)
+    val nextArtworkPendingIntent = PendingIntent.getBroadcast(
+        context, 0, nextArtworkIntent,
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     val smallWidgetHeight = context.resources.getDimensionPixelSize(
             R.dimen.widget_small_height_breakpoint)
     val image = ImageLoader.decode(
             context.contentResolver, imageUri,
-            widgetWidth / 2, widgetHeight / 2) ?: return null
+            widgetWidth, widgetHeight) ?: return null
 
     // Even after using sample size to scale an image down, it might be larger than the
     // maximum bitmap memory usage for widgets
-    val scaledImage = image.scale(widgetWidth, widgetHeight)
+    val scaledImage = image.centerCrop(widgetWidth, widgetHeight).scale(widgetWidth, widgetHeight)
     @LayoutRes val widgetLayout = if (widgetHeight < smallWidgetHeight)
         R.layout.widget_small
     else
@@ -165,12 +180,42 @@ private suspend fun createRemoteViews(
     return remoteViews
 }
 
+private fun Bitmap.centerCrop(widgetWidth: Int, widgetHeight: Int): Bitmap {
+    if (width == 0 || height == 0 || widgetWidth == 0 || widgetHeight == 0) {
+        return this
+    }
+    return when {
+        width > height && widgetWidth < widgetHeight -> {
+            Bitmap.createBitmap(
+                this,
+                (width - height) / 2,
+                0,
+                width - (width - height) / 2,
+                height
+            )
+        }
+        height > width && widgetWidth > widgetHeight -> {
+            Bitmap.createBitmap(
+                this,
+                0,
+                (height - width) / 2,
+                width,
+                height - (height - width) / 2
+            )
+        }
+        else -> {
+            this
+        }
+    }
+}
+
+
 private fun Bitmap.scale(widgetWidth: Int, widgetHeight: Int): Bitmap? {
     if (width == 0 || height == 0 ||
             widgetWidth == 0 || widgetHeight == 0) {
         return null
     }
-    val largestDimension = Math.max(widgetWidth, widgetHeight)
+    val largestDimension = max(widgetWidth, widgetHeight)
     var width = width
     var height = height
     when {

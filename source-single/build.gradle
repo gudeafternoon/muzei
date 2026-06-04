@@ -14,28 +14,33 @@
  * limitations under the License.
  */
 
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 apply plugin: 'com.android.library'
-apply plugin: 'kotlin-android'
-apply plugin: 'kotlin-kapt'
 
 dependencies {
-    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlinVersion"
-    api "org.jetbrains.kotlinx:kotlinx-coroutines-core:$coroutinesVersion"
-    api "org.jetbrains.kotlinx:kotlinx-coroutines-android:$coroutinesVersion"
-    implementation "androidx.core:core-ktx:$coreVersion"
+    api libs.coroutines.core
+    api libs.coroutines.android
+    implementation libs.core
+    implementation libs.activity
     api project(':muzei-api')
     implementation project(':extensions')
-    api "androidx.lifecycle:lifecycle-livedata-ktx:$lifecycleVersion"
+    api libs.lifecycle.livedata
 }
 
 android {
+    namespace 'com.google.android.apps.muzei.single'
     resourcePrefix 'single_'
 
-    compileSdkVersion rootProject.ext.compileSdkVersion
+    compileSdk libs.versions.compileSdk.get().toInteger()
+
+    buildFeatures {
+        buildConfig true
+    }
 
     defaultConfig {
-        minSdkVersion 19
-        targetSdkVersion rootProject.ext.targetSdkVersion
+        minSdkVersion 23
+        targetSdkVersion libs.versions.targetSdk.get()
 
         def singleAuthorityValue = "com.google.android.apps.muzei.single"
         manifestPlaceholders = [singleAuthority: singleAuthorityValue]
@@ -47,8 +52,13 @@ android {
         publicDebug
     }
 
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(JvmTarget.JVM_11)
+        }
+    }
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
     }
 }

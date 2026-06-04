@@ -14,32 +14,36 @@
  * limitations under the License.
  */
 
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 apply plugin: 'com.android.library'
-apply plugin: 'kotlin-android'
-apply plugin: 'kotlin-kapt'
 
 dependencies {
-    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlinVersion"
-    api "org.jetbrains.kotlinx:kotlinx-coroutines-core:$coroutinesVersion"
-    api "org.jetbrains.kotlinx:kotlinx-coroutines-android:$coroutinesVersion"
-    implementation "androidx.core:core-ktx:$coreVersion"
-    implementation ("android.arch.work:work-runtime-ktx:$workManagerVersion") {
-        exclude module: 'support-fragment'
-    }
+    api libs.coroutines.core
+    api libs.coroutines.android
+    implementation libs.core
+    implementation libs.preference
+    implementation libs.workManager
     implementation project(':muzei-api')
     implementation project(':extensions')
-    implementation "com.squareup.okhttp3:okhttp:$okhttpVersion"
-    implementation "androidx.browser:browser:$browserVersion"
+    implementation libs.okhttp.core
+    implementation libs.okhttp.coroutines
+    implementation libs.browser
 }
 
 android {
+    namespace 'com.google.android.apps.muzei.featuredart'
     resourcePrefix 'featuredart_'
 
-    compileSdkVersion rootProject.ext.compileSdkVersion
+    compileSdk libs.versions.compileSdk.get().toInteger()
+
+    buildFeatures {
+        buildConfig true
+    }
 
     defaultConfig {
-        minSdkVersion 19
-        targetSdkVersion rootProject.ext.targetSdkVersion
+        minSdkVersion 23
+        targetSdkVersion libs.versions.targetSdk.get()
 
         def featuredArtAuthorityValue = "com.google.android.apps.muzei.featuredart"
         manifestPlaceholders = [featuredArtAuthority: featuredArtAuthorityValue]
@@ -51,8 +55,13 @@ android {
         publicDebug
     }
 
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(JvmTarget.JVM_11)
+        }
+    }
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
     }
 }

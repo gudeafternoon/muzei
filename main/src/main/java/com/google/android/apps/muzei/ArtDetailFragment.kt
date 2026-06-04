@@ -16,67 +16,106 @@
 
 package com.google.android.apps.muzei
 
-import android.annotation.SuppressLint
+import android.app.Application
+import android.app.PendingIntent
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
-import android.util.SparseIntArray
+import android.util.SparseArray
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.MenuItem
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewPropertyAnimator
 import android.widget.TextView
-import androidx.appcompat.widget.ActionMenuView
 import androidx.appcompat.widget.TooltipCompat
-import androidx.core.content.ContextCompat
+import androidx.core.app.RemoteActionCompat
 import androidx.core.content.res.ResourcesCompat
-import androidx.core.os.bundleOf
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.core.view.children
+import androidx.core.view.get
 import androidx.core.view.isGone
 import androidx.core.view.isVisible
 import androidx.fragment.app.Fragment
-import androidx.lifecycle.LiveData
-import androidx.lifecycle.MutableLiveData
-import androidx.lifecycle.Observer
-import androidx.lifecycle.observe
+import androidx.fragment.app.viewModels
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.lifecycle.viewModelScope
 import androidx.navigation.fragment.findNavController
-import com.google.android.apps.muzei.api.MuzeiArtSource
+import androidx.savedstate.findViewTreeSavedStateRegistryOwner
+import com.davemorrissey.labs.subscaleview.ImageSource
+import com.davemorrissey.labs.subscaleview.ImageViewState
+import com.davemorrissey.labs.subscaleview.SubsamplingScaleImageView
 import com.google.android.apps.muzei.api.MuzeiContract
-import com.google.android.apps.muzei.api.UserCommand
 import com.google.android.apps.muzei.notifications.NewWallpaperNotificationReceiver
-import com.google.android.apps.muzei.render.ArtworkSizeLiveData
+import com.google.android.apps.muzei.render.ArtworkSizeStateFlow
+import com.google.android.apps.muzei.render.ContentUriImageLoader
 import com.google.android.apps.muzei.render.SwitchingPhotosDone
 import com.google.android.apps.muzei.render.SwitchingPhotosInProgress
-import com.google.android.apps.muzei.render.SwitchingPhotosLiveData
-import com.google.android.apps.muzei.room.Artwork
+import com.google.android.apps.muzei.render.SwitchingPhotosStateFlow
 import com.google.android.apps.muzei.room.MuzeiDatabase
-import com.google.android.apps.muzei.room.Provider
 import com.google.android.apps.muzei.room.getCommands
 import com.google.android.apps.muzei.room.openArtworkInfo
-import com.google.android.apps.muzei.room.sendAction
 import com.google.android.apps.muzei.settings.AboutActivity
 import com.google.android.apps.muzei.sync.ProviderManager
-import com.google.android.apps.muzei.util.AnimatedMuzeiLoadingSpinnerView
-import com.google.android.apps.muzei.util.PanScaleProxyView
-import com.google.android.apps.muzei.util.coroutineScope
+import com.google.android.apps.muzei.util.autoCleared
+import com.google.android.apps.muzei.util.collectIn
+import com.google.android.apps.muzei.util.getSerializableCompat
 import com.google.android.apps.muzei.util.makeCubicGradientScrimDrawable
+import com.google.android.apps.muzei.util.sendFromBackground
 import com.google.android.apps.muzei.widget.showWidgetPreview
+import com.google.firebase.Firebase
 import com.google.firebase.analytics.FirebaseAnalytics
+import com.google.firebase.analytics.analytics
+import com.google.firebase.analytics.logEvent
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import net.nurik.roman.muzei.BuildConfig.SOURCES_AUTHORITY
+import kotlinx.coroutines.withContext
 import net.nurik.roman.muzei.R
+import net.nurik.roman.muzei.databinding.ArtDetailFragmentBinding
 
-object ArtDetailOpenLiveData : MutableLiveData<Boolean>()
+val ArtDetailOpen = MutableStateFlow(false)
 
-class ArtDetailFragment : Fragment(), (Boolean) -> Unit {
+private fun TextView.setTextOrGone(text: String?) {
+    if (text?.isNotEmpty() == true) {
+        this.text = text
+        isVisible = true
+    } else {
+        isGone = true
+    }
+}
+
+class ArtDetailViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val database = MuzeiDatabase.getInstance(application)
+
+    val currentProvider = database.providerDao().getCurrentProviderFlow()
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), null)
+
+    val currentArtwork = database.artworkDao().getCurrentArtworkFlow()
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), null)
+}
+
+class ArtDetailFragment : Fragment(R.layout.art_detail_fragment) {
 
     companion object {
+        private const val KEY_IMAGE_VIEW_STATE = "IMAGE_VIEW_STATE"
         private val SOURCE_ACTION_IDS = intArrayOf(
                 R.id.source_action_1,
                 R.id.source_action_2,
@@ -93,181 +132,79 @@ class ArtDetailFragment : Fragment(), (Boolean) -> Unit {
     private var currentViewportId = 0
     private var wallpaperAspectRatio: Float = 0f
     private var artworkAspectRatio: Float = 0f
-
-    private val providerObserver = Observer<Provider?> { provider ->
-        val supportsNextArtwork = provider?.supportsNextArtwork == true
-        nextButton.isVisible = supportsNextArtwork
-    }
-
-    @SuppressLint("Range")
-    private val artworkObserver = Observer<Artwork?> { currentArtwork ->
-        var titleFont = R.font.alegreya_sans_black
-        var bylineFont = R.font.alegreya_sans_medium
-        if (MuzeiContract.Artwork.META_FONT_TYPE_ELEGANT == currentArtwork?.metaFont) {
-            titleFont = R.font.alegreya_black_italic
-            bylineFont = R.font.alegreya_italic
-        }
-
-        titleView.typeface = ResourcesCompat.getFont(requireContext(), titleFont)
-        titleView.text = currentArtwork?.title
-
-        bylineView.typeface = ResourcesCompat.getFont(requireContext(), bylineFont)
-        bylineView.text = currentArtwork?.byline
-
-        val attribution = currentArtwork?.attribution
-        if (attribution?.isNotEmpty() == true) {
-            attributionView.text = attribution
-            attributionView.isVisible = true
-        } else {
-            attributionView.isGone = true
-        }
-
-        metadataView.setOnClickListener {
-            val context = requireContext()
-            coroutineScope.launch {
-                FirebaseAnalytics.getInstance(context).logEvent("artwork_info_open", bundleOf(
-                        FirebaseAnalytics.Param.CONTENT_TYPE to "art_detail"))
-                currentArtworkLiveData.value?.openArtworkInfo(context)
-            }
-        }
-
-        coroutineScope.launch(Dispatchers.Main) {
-            val commands = context?.run {
-                currentArtwork?.getCommands(this) ?: run {
-                    if (currentProviderLiveData.value?.authority == SOURCES_AUTHORITY) {
-                        listOf(UserCommand(
-                                MuzeiArtSource.BUILTIN_COMMAND_ID_NEXT_ARTWORK,
-                                        getString(R.string.action_next_artwork)))
-                    } else {
-                        listOf()
-                    }
-                }
-            } ?: return@launch
-            val activity = activity ?: return@launch
-            overflowSourceActionMap.clear()
-            overflowMenu.menu.clear()
-            activity.menuInflater.inflate(R.menu.muzei_overflow,
-                    overflowMenu.menu)
-            commands.take(SOURCE_ACTION_IDS.size).forEachIndexed { i, action ->
-                overflowSourceActionMap.put(SOURCE_ACTION_IDS[i], action.id)
-                val menuItem = overflowMenu.menu.add(0, SOURCE_ACTION_IDS[i],
-                        0, action.title)
-                if (action.id == MuzeiArtSource.BUILTIN_COMMAND_ID_NEXT_ARTWORK &&
-                        currentProviderLiveData.value?.authority == SOURCES_AUTHORITY) {
-                    menuItem.setIcon(R.drawable.ic_skip)
-                    menuItem.setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
-                }
-            }
-        }
-        showFakeLoading = false
-        updateLoadingSpinnerVisibility()
-    }
-
     private var guardViewportChangeListener: Boolean = false
     private var deferResetViewport: Boolean = false
 
-    private lateinit var containerView: View
-    private lateinit var overflowMenu: ActionMenuView
-    private val overflowSourceActionMap = SparseIntArray()
-    private lateinit var chromeContainerView: View
-    private lateinit var metadataView: View
-    private lateinit var loadingContainerView: View
-    private lateinit var loadingIndicatorView: AnimatedMuzeiLoadingSpinnerView
-    private lateinit var nextButton: View
-    private lateinit var titleView: TextView
-    private lateinit var bylineView: TextView
-    private lateinit var attributionView: TextView
-    private lateinit var panScaleProxyView: PanScaleProxyView
+    private val showBackgroundImage by lazy {
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.N
+                && requireActivity().isInMultiWindowMode
+    }
+    private val metadataSlideDistance by lazy {
+        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 8f, resources.displayMetrics)
+    }
+
+    private var binding: ArtDetailFragmentBinding by autoCleared()
+    private val overflowSourceActionMap = SparseArray<RemoteActionCompat>()
     private var loadingSpinnerShown = false
     private var showFakeLoading = false
-    private val currentProviderLiveData: LiveData<Provider?> by lazy {
-        MuzeiDatabase.getInstance(requireContext()).providerDao().currentProvider
-    }
-    private val currentArtworkLiveData: LiveData<Artwork?> by lazy {
-        MuzeiDatabase.getInstance(requireContext()).artworkDao().currentArtwork
-    }
+    private var showChrome = true
+
+    private val viewModel: ArtDetailViewModel by viewModels()
 
     private var unsetNextFakeLoading: Job? = null
     private var showLoadingSpinner: Job? = null
+    private var loadCommandsJob: Job? = null
+
+    init {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                NewWallpaperNotificationReceiver.markNotificationRead(requireContext())
+            }
+        }
+    }
 
     override fun onCreateView(
             inflater: LayoutInflater,
             container: ViewGroup?,
             savedInstanceState: Bundle?
     ): View? {
-        containerView = inflater.inflate(R.layout.art_detail_fragment, container, false)
-
-        chromeContainerView = containerView.findViewById(R.id.chrome_container)
         showHideChrome(true)
-
-        return containerView
+        return super.onCreateView(inflater, container, savedInstanceState)
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-        // Ensure we have the latest insets
-        ViewCompat.requestApplyInsets(view)
+        binding = ArtDetailFragmentBinding.bind(view)
+        binding.scrim.background = makeCubicGradientScrimDrawable(Gravity.TOP, 0x44)
 
-        val scrim = view.findViewById<View>(R.id.art_detail_scrim)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            scrim.background = makeCubicGradientScrimDrawable(Gravity.TOP, 0x44)
+        val scrimColor = resources.getInteger(R.integer.scrim_channel_color)
+        binding.chromeContainer.background = makeCubicGradientScrimDrawable(Gravity.BOTTOM, 0xAA,
+                scrimColor, scrimColor, scrimColor)
+
+        ViewCompat.setOnApplyWindowInsetsListener(view) { _, insets ->
+            showChrome = insets.isVisible(WindowInsetsCompat.Type.statusBars())
+            animateChromeVisibility(showChrome)
+            insets
         }
 
-        chromeContainerView.background = makeCubicGradientScrimDrawable(Gravity.BOTTOM, 0xAA)
+        binding.title.typeface = ResourcesCompat.getFont(requireContext(), R.font.alegreya_sans_black)
+        binding.byline.typeface = ResourcesCompat.getFont(requireContext(), R.font.alegreya_sans_medium)
 
-        metadataView = view.findViewById(R.id.metadata)
-
-        val metadataSlideDistance = TypedValue.applyDimension(
-                TypedValue.COMPLEX_UNIT_DIP, 8f, resources.displayMetrics)
-        containerView.setOnSystemUiVisibilityChangeListener { vis ->
-            val visible = vis and View.SYSTEM_UI_FLAG_LOW_PROFILE == 0
-
-            scrim.visibility = View.VISIBLE
-            scrim.animate()
-                    .alpha(if (visible) 1f else 0f)
-                    .setDuration(200)
-                    .withEndAction {
-                        if (!visible) {
-                            scrim.visibility = View.GONE
-                        }
-                    }
-
-            chromeContainerView.isVisible = true
-            chromeContainerView.animate()
-                    .alpha(if (visible) 1f else 0f)
-                    .translationY(if (visible) 0f else metadataSlideDistance)
-                    .setDuration(200)
-                    .withEndAction {
-                        if (!visible) {
-                            chromeContainerView.isGone = true
-                        }
-                    }
-        }
-
-        titleView = view.findViewById(R.id.title)
-        bylineView = view.findViewById(R.id.byline)
-        attributionView = view.findViewById(R.id.attribution)
-
-        overflowMenu = view.findViewById(R.id.overflow_menu_view)
-        overflowMenu.overflowIcon = ContextCompat.getDrawable(requireContext(),
-                R.drawable.ic_overflow)
-        overflowMenu.setOnMenuItemClickListener { menuItem ->
+        binding.overflowMenu.setOnMenuItemClickListener { menuItem ->
             val context = context ?: return@setOnMenuItemClickListener false
-            val id = overflowSourceActionMap.get(menuItem.itemId)
-            if (id > 0) {
-                currentArtworkLiveData.value?.run {
-                    GlobalScope.launch {
-                        if (id == MuzeiArtSource.BUILTIN_COMMAND_ID_NEXT_ARTWORK) {
-                            FirebaseAnalytics.getInstance(context).logEvent("next_artwork", bundleOf(
-                                    FirebaseAnalytics.Param.CONTENT_TYPE to "art_detail"))
-                        } else {
-                            FirebaseAnalytics.getInstance(context).logEvent(
-                                    FirebaseAnalytics.Event.SELECT_CONTENT, bundleOf(
-                                    FirebaseAnalytics.Param.ITEM_ID to id,
-                                    FirebaseAnalytics.Param.ITEM_NAME to menuItem.title,
-                                    FirebaseAnalytics.Param.ITEM_CATEGORY to "actions",
-                                    FirebaseAnalytics.Param.CONTENT_TYPE to "art_detail"))
-                        }
-                        sendAction(context, id)
+            val action = overflowSourceActionMap.get(menuItem.itemId)
+            if (action != null) {
+                viewModel.currentArtwork.value?.run {
+                    Firebase.analytics.logEvent(FirebaseAnalytics.Event.SELECT_ITEM) {
+                        param(FirebaseAnalytics.Param.ITEM_LIST_ID, providerAuthority)
+                        param(FirebaseAnalytics.Param.ITEM_NAME, menuItem.title.toString())
+                        param(FirebaseAnalytics.Param.ITEM_LIST_NAME, "actions")
+                        param(FirebaseAnalytics.Param.CONTENT_TYPE, "art_detail")
+                    }
+                    try {
+                        action.actionIntent.sendFromBackground()
+                    } catch (_: PendingIntent.CanceledException) {
+                        // Why do you give us a cancelled PendingIntent.
+                        // We can't do anything with that.
                     }
                 }
                 return@setOnMenuItemClickListener true
@@ -275,12 +212,24 @@ class ArtDetailFragment : Fragment(), (Boolean) -> Unit {
 
             return@setOnMenuItemClickListener when (menuItem.itemId) {
                 R.id.action_gestures -> {
-                    FirebaseAnalytics.getInstance(context).logEvent("gestures_open", null)
-                    findNavController().navigate(ArtDetailFragmentDirections.gestures())
+                    val navController = findNavController()
+                    if (navController.currentDestination?.id == R.id.main_art_details) {
+                        Firebase.analytics.logEvent("gestures_open", null)
+                        navController.navigate(ArtDetailFragmentDirections.gestures())
+                    }
+                    true
+                }
+                R.id.action_always_dark -> {
+                    val alwaysDark = !menuItem.isChecked
+                    menuItem.isChecked = alwaysDark
+                    Firebase.analytics.logEvent("always_dark") {
+                        param(FirebaseAnalytics.Param.VALUE, alwaysDark.toString())
+                    }
+                    MuzeiApplication.setAlwaysDark(context, alwaysDark)
                     true
                 }
                 R.id.action_about -> {
-                    FirebaseAnalytics.getInstance(context).logEvent("about_open", null)
+                    Firebase.analytics.logEvent("about_open", null)
                     startActivity(Intent(context, AboutActivity::class.java))
                     true
                 }
@@ -288,102 +237,232 @@ class ArtDetailFragment : Fragment(), (Boolean) -> Unit {
             }
         }
 
-        nextButton = view.findViewById(R.id.next_button)
-        nextButton.setOnClickListener {
-            FirebaseAnalytics.getInstance(requireContext()).logEvent("next_artwork", bundleOf(
-                    FirebaseAnalytics.Param.CONTENT_TYPE to "art_detail"))
+        binding.nextArtwork.setOnClickListener {
+            Firebase.analytics.logEvent("next_artwork") {
+                param(FirebaseAnalytics.Param.CONTENT_TYPE, "art_detail")
+            }
             ProviderManager.getInstance(requireContext()).nextArtwork()
             showFakeLoading()
         }
-        TooltipCompat.setTooltipText(nextButton, nextButton.contentDescription)
+        TooltipCompat.setTooltipText(binding.nextArtwork, binding.nextArtwork.contentDescription)
 
-        panScaleProxyView = view.findViewById(R.id.pan_scale_proxy)
-        panScaleProxyView.apply {
+        // Ensure that when the view state is saved, the SubsamplingScaleImageView also
+        // has its state saved
+        view.findViewTreeSavedStateRegistryOwner()?.savedStateRegistry
+                ?.registerSavedStateProvider(KEY_IMAGE_VIEW_STATE) {
+                    val backgroundImage =
+                            binding.backgroundImageContainer[binding.backgroundImageContainer.displayedChild]
+                                    as SubsamplingScaleImageView
+                    Bundle().apply {
+                        putSerializable(KEY_IMAGE_VIEW_STATE, backgroundImage.state)
+                    }
+                }
+        binding.backgroundImageContainer.isVisible = showBackgroundImage
+        val viewLifecycle = viewLifecycleOwner.lifecycle
+        binding.backgroundImageContainer.children.forEachIndexed { index, img ->
+            val backgroundImage = img as SubsamplingScaleImageView
+            backgroundImage.apply {
+                setMinimumScaleType(SubsamplingScaleImageView.SCALE_TYPE_CENTER_CROP)
+                setOnImageEventListener(object : SubsamplingScaleImageView.DefaultOnImageEventListener() {
+                    override fun onImageLoaded() {
+                        if (viewLifecycle.currentState.isAtLeast(Lifecycle.State.CREATED)) {
+                            // Only update the displayedChild when the image has finished loading
+                            binding.backgroundImageContainer.displayedChild = index
+                        }
+                    }
+                })
+                setOnClickListener {
+                    showChrome = !showChrome
+                    animateChromeVisibility(showChrome)
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val scope = viewLifecycleOwner.lifecycleScope
+                    setOnLongClickListener {
+                        scope.launch {
+                            showWidgetPreview(requireContext().applicationContext)
+                        }
+                        true
+                    }
+                }
+            }
+        }
+
+        binding.panScaleProxy.apply {
+            // Don't show the PanScaleProxyView when the background image is visible
+            isVisible = !showBackgroundImage
             setMaxZoom(5)
             onViewportChanged = {
                 if (!guardViewportChangeListener) {
                     ArtDetailViewport.setViewport(
-                            currentViewportId, panScaleProxyView.currentViewport, true)
+                            currentViewportId, binding.panScaleProxy.currentViewport, true)
                 }
             }
             onSingleTapUp = {
-                val window = activity?.window
-                if (window != null) {
-                    showHideChrome(window.decorView.systemUiVisibility and
-                            View.SYSTEM_UI_FLAG_LOW_PROFILE != 0)
-                }
+                showChrome = !showChrome
+                showHideChrome(showChrome)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val scope = viewLifecycleOwner.lifecycleScope
                 onLongPress = {
-                    coroutineScope.launch {
+                    scope.launch {
                         showWidgetPreview(requireContext().applicationContext)
                     }
                 }
             }
         }
 
-        loadingContainerView = view.findViewById(R.id.image_loading_container)
-        loadingIndicatorView = view.findViewById(R.id.image_loading_indicator)
-
-        WallpaperSizeLiveData.observe(this) { size ->
+        WallpaperSizeStateFlow.filterNotNull().collectIn(viewLifecycleOwner) { size ->
             wallpaperAspectRatio = if (size.height > 0) {
                 size.width * 1f / size.height
             } else {
-                panScaleProxyView.width * 1f / panScaleProxyView.height
+                binding.panScaleProxy.width * 1f / binding.panScaleProxy.height
             }
             resetProxyViewport()
         }
 
-        ArtworkSizeLiveData.observe(this) { size ->
+        ArtworkSizeStateFlow.filterNotNull().collectIn(viewLifecycleOwner) { size ->
             artworkAspectRatio = size.width * 1f / size.height
             resetProxyViewport()
         }
 
-        ArtDetailViewport.addObserver(this)
+        ArtDetailViewport.getChanges().collectIn(viewLifecycleOwner) { isFromUser ->
+            if (!isFromUser) {
+                guardViewportChangeListener = true
+                binding.panScaleProxy.setViewport(ArtDetailViewport.getViewport(currentViewportId))
+                guardViewportChangeListener = false
+            }
+        }
 
-        SwitchingPhotosLiveData.observe(this) { switchingPhotos ->
+        SwitchingPhotosStateFlow.filterNotNull().collectIn(viewLifecycleOwner) { switchingPhotos ->
             currentViewportId = switchingPhotos.viewportId
-            panScaleProxyView.panScaleEnabled = switchingPhotos is SwitchingPhotosDone
+            binding.panScaleProxy.panScaleEnabled = switchingPhotos is SwitchingPhotosDone
             // Process deferred artwork size change when done switching
             if (switchingPhotos is SwitchingPhotosDone && deferResetViewport) {
                 resetProxyViewport()
             }
         }
 
-        currentProviderLiveData.observe(this, providerObserver)
-        currentArtworkLiveData.observe(this, artworkObserver)
+        viewModel.currentProvider.collectIn(viewLifecycleOwner) { provider ->
+            val supportsNextArtwork = provider?.supportsNextArtwork == true
+            binding.nextArtwork.isVisible = supportsNextArtwork
+        }
+
+        viewModel.currentArtwork.collectIn(viewLifecycleOwner) { currentArtwork ->
+            binding.title.setTextOrGone(currentArtwork?.title)
+            binding.byline.setTextOrGone(currentArtwork?.byline)
+            binding.attribution.setTextOrGone(currentArtwork?.attribution)
+
+            binding.metadata.setOnClickListener {
+                val context = requireContext()
+                lifecycleScope.launch {
+                    Firebase.analytics.logEvent("artwork_info_open") {
+                        param(FirebaseAnalytics.Param.CONTENT_TYPE, "art_detail")
+                    }
+                    viewModel.currentArtwork.value?.openArtworkInfo(context)
+                }
+            }
+
+            if (binding.backgroundImageContainer.isVisible) {
+                viewLifecycleOwner.lifecycleScope.launch {
+                    val nextId = (binding.backgroundImageContainer.displayedChild + 1) % 2
+                    val orientation = withContext(Dispatchers.IO) {
+                        ContentUriImageLoader(requireContext().contentResolver,
+                                MuzeiContract.Artwork.CONTENT_URI).getRotation()
+                    }
+                    val backgroundImage = binding.backgroundImageContainer[nextId]
+                            as SubsamplingScaleImageView
+                    backgroundImage.orientation = orientation
+                    // Try to restore any saved state of the SubsamplingScaleImageView
+                    // This would normally only be available after onViewStateRestored(), but
+                    // this is within coroutine that is only launched when STARTED
+                    val backgroundImageViewState = view.findViewTreeSavedStateRegistryOwner()
+                            ?.savedStateRegistry
+                            ?.consumeRestoredStateForKey(KEY_IMAGE_VIEW_STATE)
+                            ?.getSerializableCompat<ImageViewState>(KEY_IMAGE_VIEW_STATE)
+                    backgroundImage.setImage(ImageSource.uri(MuzeiContract.Artwork.CONTENT_URI),
+                            backgroundImageViewState)
+                    // Set the image to visible since SubsamplingScaleImageView does some of
+                    // its processing in onDraw()
+                    backgroundImage.isVisible = true
+                }
+            }
+
+            loadCommandsJob?.cancelAndJoin()
+            loadCommandsJob = viewLifecycleOwner.lifecycleScope.launch {
+                val commands = context?.run {
+                    currentArtwork?.getCommands(this)
+                } ?: listOf()
+                ensureActive()
+                val activity = activity ?: return@launch
+                overflowSourceActionMap.clear()
+                binding.overflowMenu.menu.clear()
+                activity.menuInflater.inflate(R.menu.muzei_overflow,
+                        binding.overflowMenu.menu)
+                binding.overflowMenu.menu.findItem(R.id.action_always_dark)?.isChecked =
+                        MuzeiApplication.getAlwaysDark(activity)
+                commands.filterNot { action ->
+                    action.title.isBlank()
+                }.take(SOURCE_ACTION_IDS.size).forEachIndexed { i, action ->
+                    overflowSourceActionMap.put(SOURCE_ACTION_IDS[i], action)
+                    binding.overflowMenu.menu.add(0, SOURCE_ACTION_IDS[i],
+                            0, action.title).apply {
+                        isEnabled = action.isEnabled
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            contentDescription = action.contentDescription
+                        }
+                        if (action.shouldShowIcon()) {
+                            icon = action.icon.loadDrawable(activity)
+                            setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
+                        }
+                    }
+                }
+            }
+            showFakeLoading = false
+            updateLoadingSpinnerVisibility()
+        }
     }
 
     override fun onStart() {
         super.onStart()
-        ArtDetailOpenLiveData.value = true
-    }
-
-    override fun onResume() {
-        super.onResume()
-        coroutineScope.launch {
-            NewWallpaperNotificationReceiver.markNotificationRead(requireContext())
-        }
-    }
-
-    override fun onDestroyView() {
-        super.onDestroyView()
-        ArtDetailViewport.removeObserver(this)
-        currentProviderLiveData.removeObserver(providerObserver)
-        currentArtworkLiveData.removeObserver(artworkObserver)
+        ArtDetailOpen.value = true
     }
 
     private fun showHideChrome(show: Boolean) {
-        var flags = if (show) 0 else View.SYSTEM_UI_FLAG_LOW_PROFILE
-        flags = flags or (View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                or View.SYSTEM_UI_FLAG_LAYOUT_STABLE)
-        if (!show) {
-            flags = flags or (View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                    or View.SYSTEM_UI_FLAG_FULLSCREEN
-                    or View.SYSTEM_UI_FLAG_IMMERSIVE)
+        val window = activity?.window ?: return
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            if (show) {
+                show(WindowInsetsCompat.Type.systemBars())
+            } else {
+                hide(WindowInsetsCompat.Type.systemBars())
+            }
         }
-        requireActivity().window.decorView.systemUiVisibility = flags
+    }
+
+    private fun animateChromeVisibility(visible: Boolean) {
+        with(binding.scrim) {
+            visibility = View.VISIBLE
+            animate()
+                .alpha(if (visible) 1f else 0f)
+                .setDuration(200)
+                .withEndAction {
+                    if (!visible) {
+                        visibility = View.GONE
+                    }
+                }
+        }
+
+        with(binding.chromeContainer) {
+            isVisible = true
+            animate()
+                .alpha(if (visible) 1f else 0f)
+                .translationY(if (visible) 0f else metadataSlideDistance)
+                .setDuration(200)
+                .withEndAction {
+                    if (!visible) {
+                        isGone = true
+                    }
+                }
+        }
     }
 
     private fun resetProxyViewport() {
@@ -392,26 +471,18 @@ class ArtDetailFragment : Fragment(), (Boolean) -> Unit {
         }
 
         deferResetViewport = false
-        if (SwitchingPhotosLiveData.value is SwitchingPhotosInProgress) {
+        if (SwitchingPhotosStateFlow.value is SwitchingPhotosInProgress) {
             deferResetViewport = true
             return
         }
 
-        panScaleProxyView.relativeAspectRatio = artworkAspectRatio / wallpaperAspectRatio
-    }
-
-    override fun invoke(isFromUser: Boolean) {
-        if (!isFromUser) {
-            guardViewportChangeListener = true
-            panScaleProxyView.setViewport(ArtDetailViewport.getViewport(currentViewportId))
-            guardViewportChangeListener = false
-        }
+        binding.panScaleProxy.relativeAspectRatio = artworkAspectRatio / wallpaperAspectRatio
     }
 
     override fun onStop() {
         super.onStop()
-        overflowMenu.hideOverflowMenu()
-        ArtDetailOpenLiveData.value = false
+        binding.overflowMenu.hideOverflowMenu()
+        ArtDetailOpen.value = false
     }
 
     private fun showFakeLoading() {
@@ -420,7 +491,7 @@ class ArtDetailFragment : Fragment(), (Boolean) -> Unit {
         // the loading spinner will go away.
         updateLoadingSpinnerVisibility()
         unsetNextFakeLoading?.cancel()
-        unsetNextFakeLoading = coroutineScope.launch(Dispatchers.Main) {
+        unsetNextFakeLoading = viewLifecycleOwner.lifecycleScope.launch {
             delay(10000)
             showFakeLoading = false
             updateLoadingSpinnerVisibility()
@@ -435,23 +506,43 @@ class ArtDetailFragment : Fragment(), (Boolean) -> Unit {
                 showLoadingSpinner = null
             }
             if (showFakeLoading) {
-                this.showLoadingSpinner = coroutineScope.launch(Dispatchers.Main) {
+                showLoadingSpinner = viewLifecycleOwner.lifecycleScope.launch {
                     delay(700)
-                    loadingIndicatorView.start()
-                    loadingContainerView.isVisible = true
-                    loadingContainerView.animate()
+                    binding.imageLoadingIndicator.start()
+                    binding.imageLoadingContainer.isVisible = true
+                    var animator: ViewPropertyAnimator? = null
+                    try {
+                        animator = binding.imageLoadingContainer.animate()
                             .alpha(1f)
                             .setDuration(300)
-                            .withEndAction(null)
+                            .withEndAction {
+                                showLoadingSpinner = null
+                                animator = null
+                                cancel()
+                            }
+                        awaitCancellation()
+                    } finally {
+                        animator?.cancel()
+                    }
                 }
             } else {
-                loadingContainerView.animate()
-                        .alpha(0f)
-                        .setDuration(1000)
-                        .withEndAction {
-                            loadingContainerView.isGone = true
-                            loadingIndicatorView.stop()
-                        }
+                viewLifecycleOwner.lifecycleScope.launch {
+                    var animator: ViewPropertyAnimator? = null
+                    try {
+                        animator = binding.imageLoadingContainer.animate()
+                            .alpha(0f)
+                            .setDuration(10000)
+                            .withEndAction {
+                                binding.imageLoadingContainer.isGone = true
+                                binding.imageLoadingIndicator.stop()
+                                animator = null
+                                cancel()
+                            }
+                        awaitCancellation()
+                    } finally {
+                        animator?.cancel()
+                    }
+                }
             }
         }
     }

@@ -20,39 +20,47 @@ import android.app.WallpaperManager
 import android.content.Context
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.MutableLiveData
-import com.google.firebase.analytics.FirebaseAnalytics
+import com.google.firebase.Firebase
+import com.google.firebase.analytics.analytics
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import net.nurik.roman.muzei.BuildConfig
 
-object WallpaperActiveState : MutableLiveData<Boolean>() {
-    fun initState(context: Context) {
-        if (value == null) {
-            val wallpaperManager = WallpaperManager.getInstance(context)
-            value = wallpaperManager.wallpaperInfo?.packageName == context.packageName
-        }
+private val mutableWallpaperActiveState = MutableStateFlow(false)
+val WallpaperActiveState = mutableWallpaperActiveState.asStateFlow()
+
+private var initializedState = false
+fun initializeWallpaperActiveState(context: Context) {
+    if (!initializedState) {
+        val wallpaperManager = WallpaperManager.getInstance(context)
+        mutableWallpaperActiveState.value =
+                wallpaperManager.wallpaperInfo?.packageName == context.packageName
+        initializedState = true
     }
 }
 
 /**
  * LifecycleObserver responsible for sending analytics callbacks based on the state of the wallpaper
  */
-class WallpaperAnalytics(private val context: Context) : DefaultLifecycleObserver {
+class WallpaperAnalytics(context: Context) : DefaultLifecycleObserver {
 
     init {
-        WallpaperActiveState.initState(context)
+        initializeWallpaperActiveState(context)
     }
 
-    override fun onCreate(owner: LifecycleOwner) {
-        FirebaseAnalytics.getInstance(context).setUserProperty("device_type", BuildConfig.DEVICE_TYPE)
+    override fun onStart(owner: LifecycleOwner) {
+        Firebase.analytics.setUserProperty("device_type", BuildConfig.DEVICE_TYPE)
     }
 
     override fun onResume(owner: LifecycleOwner) {
-        FirebaseAnalytics.getInstance(context).logEvent("wallpaper_created", null)
-        WallpaperActiveState.value = true
+        Firebase.analytics.logEvent("wallpaper_created", null)
+        mutableWallpaperActiveState.value = true
+        initializedState = true
     }
 
     override fun onPause(owner: LifecycleOwner) {
-        FirebaseAnalytics.getInstance(context).logEvent("wallpaper_destroyed", null)
-        WallpaperActiveState.value = false
+        Firebase.analytics.logEvent("wallpaper_destroyed", null)
+        mutableWallpaperActiveState.value = false
+        initializedState = true
     }
 }

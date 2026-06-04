@@ -26,24 +26,28 @@ import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import android.widget.Toast
 import androidx.annotation.RequiresApi
-import androidx.core.os.bundleOf
+import androidx.core.service.quicksettings.PendingIntentActivityWrapper
+import androidx.core.service.quicksettings.TileServiceCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
-import androidx.lifecycle.LiveData
-import androidx.lifecycle.observe
+import androidx.lifecycle.lifecycleScope
 import com.google.android.apps.muzei.MuzeiWallpaperService
 import com.google.android.apps.muzei.room.MuzeiDatabase
 import com.google.android.apps.muzei.room.Provider
-import com.google.android.apps.muzei.sources.SourceManager
-import com.google.android.apps.muzei.sources.allowsNextArtwork
+import com.google.android.apps.muzei.sync.ProviderManager
+import com.google.android.apps.muzei.util.collectIn
 import com.google.android.apps.muzei.util.toast
 import com.google.android.apps.muzei.wallpaper.WallpaperActiveState
+import com.google.firebase.Firebase
 import com.google.firebase.analytics.FirebaseAnalytics
-import kotlinx.coroutines.GlobalScope
+import com.google.firebase.analytics.analytics
+import com.google.firebase.analytics.logEvent
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import net.nurik.roman.muzei.R
+import net.nurik.roman.muzei.androidclientcommon.R as CommonR
 
 /**
  * Quick Settings Tile which allows users quick access to the 'Next Artwork' command, if supported.
@@ -54,43 +58,44 @@ import net.nurik.roman.muzei.R
 class NextArtworkTileService : TileService(), LifecycleOwner {
     private val lifecycleRegistry: LifecycleRegistry = LifecycleRegistry(this)
 
-    private lateinit var providerLiveData: LiveData<Provider?>
+    private var currentProvider: Provider? = null
 
     override fun onCreate() {
         super.onCreate()
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
-        WallpaperActiveState.observe(this) {
-            updateTile(providerLiveData.value)
+        WallpaperActiveState.collectIn(this) {
+            updateTile()
         }
         // Start listening for source changes, which will include when a source
         // starts or stops supporting the 'Next Artwork' command
-        providerLiveData = MuzeiDatabase.getInstance(this).providerDao().currentProvider
-        providerLiveData.observe(this, this::updateTile)
+        val database = MuzeiDatabase.getInstance(this)
+        database.providerDao().getCurrentProviderFlow().collectIn(this) { provider ->
+            currentProvider = provider
+            updateTile()
+        }
     }
 
-    override fun getLifecycle(): Lifecycle {
-        return lifecycleRegistry
-    }
+    override val lifecycle: Lifecycle = lifecycleRegistry
 
     override fun onTileAdded() {
-        FirebaseAnalytics.getInstance(this).logEvent("tile_next_artwork_added", null)
+        Firebase.analytics.logEvent("tile_next_artwork_added", null)
     }
 
     override fun onStartListening() {
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_START)
     }
 
-    private fun updateTile(provider: Provider?) {
+    private fun updateTile() {
         val context = this
-        qsTile?.takeIf { WallpaperActiveState.value != true || provider != null }?.apply {
+        qsTile?.takeIf { !WallpaperActiveState.value || currentProvider != null }?.apply {
             when {
-                WallpaperActiveState.value != true -> {
+                !WallpaperActiveState.value -> {
                     // If the wallpaper isn't active, the quick tile will activate it
                     state = Tile.STATE_INACTIVE
                     label = getString(R.string.action_activate)
-                    icon = Icon.createWithResource(context, R.drawable.ic_stat_muzei)
+                    icon = Icon.createWithResource(context, CommonR.drawable.ic_stat_muzei)
                 }
-                runBlocking { provider.allowsNextArtwork(context) } -> {
+                currentProvider?.supportsNextArtwork == true -> {
                     state = Tile.STATE_ACTIVE
                     label = getString(R.string.action_next_artwork)
                     icon = Icon.createWithResource(context, R.drawable.ic_notif_next_artwork)
@@ -109,28 +114,42 @@ class NextArtworkTileService : TileService(), LifecycleOwner {
         qsTile?.run {
             when (state) {
                 Tile.STATE_ACTIVE -> { // Active means we send the 'Next Artwork' command
-                    GlobalScope.launch {
-                        FirebaseAnalytics.getInstance(context).logEvent(
-                                "next_artwork", bundleOf(
-                                FirebaseAnalytics.Param.CONTENT_TYPE to "tile"))
-                        SourceManager.nextArtwork(context)
+                    lifecycleScope.launch {
+                        withContext(NonCancellable) {
+                            Firebase.analytics.logEvent("next_artwork") {
+                                param(FirebaseAnalytics.Param.CONTENT_TYPE, "tile")
+                            }
+                            ProviderManager.getInstance(context).nextArtwork()
+                        }
                     }
                 }
                 else -> unlockAndRun {
                     // Inactive means we attempt to activate Muzei
-                    FirebaseAnalytics.getInstance(context).logEvent(
-                            "tile_next_artwork_activate", null)
+                    Firebase.analytics.logEvent("tile_next_artwork_activate", null)
                     try {
-                        startActivityAndCollapse(Intent(WallpaperManager.ACTION_CHANGE_LIVE_WALLPAPER)
+                        val wrapper = PendingIntentActivityWrapper(
+                            context,
+                            0,
+                            Intent(WallpaperManager.ACTION_CHANGE_LIVE_WALLPAPER)
                                 .putExtra(WallpaperManager.EXTRA_LIVE_WALLPAPER_COMPONENT,
-                                        ComponentName(context,
-                                                MuzeiWallpaperService::class.java))
-                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                                    ComponentName(context, MuzeiWallpaperService::class.java))
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                            0,
+                            false
+                        )
+                        TileServiceCompat.startActivityAndCollapse(context, wrapper)
                     } catch (_: ActivityNotFoundException) {
                         try {
-                            startActivityAndCollapse(Intent(WallpaperManager.ACTION_LIVE_WALLPAPER_CHOOSER)
-                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                        } catch (e: ActivityNotFoundException) {
+                            val wrapper = PendingIntentActivityWrapper(
+                                context,
+                                0,
+                                Intent(WallpaperManager.ACTION_LIVE_WALLPAPER_CHOOSER)
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                                0,
+                                false
+                            )
+                            TileServiceCompat.startActivityAndCollapse(context, wrapper)
+                        } catch (_: ActivityNotFoundException) {
                             context.toast(R.string.error_wallpaper_chooser, Toast.LENGTH_LONG)
                         }
                     }
@@ -144,7 +163,7 @@ class NextArtworkTileService : TileService(), LifecycleOwner {
     }
 
     override fun onTileRemoved() {
-        FirebaseAnalytics.getInstance(this).logEvent("tile_next_artwork_removed", null)
+        Firebase.analytics.logEvent("tile_next_artwork_removed", null)
     }
 
     override fun onDestroy() {

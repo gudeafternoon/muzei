@@ -65,13 +65,13 @@ class MuzeiProvider : ContentProvider() {
          */
         private val uriMatcher = UriMatcher(UriMatcher.NO_MATCH).apply {
             addURI(MuzeiContract.AUTHORITY, MuzeiContract.Artwork.TABLE_NAME,
-                    MuzeiProvider.ARTWORK)
+                    ARTWORK)
             addURI(MuzeiContract.AUTHORITY, "${MuzeiContract.Artwork.TABLE_NAME}/#",
-                    MuzeiProvider.ARTWORK_ID)
+                    ARTWORK_ID)
             addURI(MuzeiContract.AUTHORITY, MuzeiContract.Sources.TABLE_NAME,
-                    MuzeiProvider.SOURCES)
+                    SOURCES)
             addURI(MuzeiContract.AUTHORITY, "${MuzeiContract.Sources.TABLE_NAME}/#",
-                    MuzeiProvider.SOURCE_ID)
+                    SOURCE_ID)
         }
     }
 
@@ -81,35 +81,35 @@ class MuzeiProvider : ContentProvider() {
     private val allArtworkColumnProjectionMap = mapOf(
             BaseColumns._ID to "artwork._id",
             "${MuzeiContract.Artwork.TABLE_NAME}.${BaseColumns._ID}" to "artwork._id",
-            MuzeiContract.Artwork.COLUMN_NAME_SOURCE_COMPONENT_NAME to
+            MuzeiContract.Artwork.COLUMN_NAME_PROVIDER_AUTHORITY to
                     "providerAuthority AS sourceComponentName",
             MuzeiContract.Artwork.COLUMN_NAME_IMAGE_URI to "imageUri",
             MuzeiContract.Artwork.COLUMN_NAME_TITLE to "title",
             MuzeiContract.Artwork.COLUMN_NAME_BYLINE to "byline",
             MuzeiContract.Artwork.COLUMN_NAME_ATTRIBUTION to "attribution",
-            MuzeiContract.Artwork.COLUMN_NAME_TOKEN to "NULL AS token",
-            MuzeiContract.Artwork.COLUMN_NAME_VIEW_INTENT to "NULL AS viewIntent",
-            MuzeiContract.Artwork.COLUMN_NAME_META_FONT to "metaFont",
+            "token" to "NULL AS token",
+            "viewIntent" to "NULL AS viewIntent",
+            "metaFont" to "\"\" as metaFont",
             MuzeiContract.Artwork.COLUMN_NAME_DATE_ADDED to "date_added",
             "${MuzeiContract.Sources.TABLE_NAME}.${BaseColumns._ID}" to
                     "0 AS \"sources._id\"",
-            MuzeiContract.Sources.COLUMN_NAME_COMPONENT_NAME to
+            MuzeiContract.Sources.COLUMN_NAME_AUTHORITY to
                     "providerAuthority AS component_name",
-            MuzeiContract.Sources.COLUMN_NAME_IS_SELECTED to "1 AS selected",
+            "selected" to "1 AS selected",
             MuzeiContract.Sources.COLUMN_NAME_DESCRIPTION to "\"\" AS description",
-            MuzeiContract.Sources.COLUMN_NAME_WANTS_NETWORK_AVAILABLE to "0 AS network",
+            "network" to "0 AS network",
             MuzeiContract.Sources.COLUMN_NAME_SUPPORTS_NEXT_ARTWORK_COMMAND to
                     "1 AS supports_next_artwork",
-            MuzeiContract.Sources.COLUMN_NAME_COMMANDS to "NULL AS commands"
+            "commands" to "NULL AS commands"
     )
 
     override fun delete(uri: Uri, selection: String?, selectionArgs: Array<String>?): Int {
         throw UnsupportedOperationException("Deletes are not supported")
     }
 
-    override fun getType(uri: Uri): String? {
+    override fun getType(uri: Uri): String {
         // Chooses the MIME type based on the incoming URI pattern
-        return when (MuzeiProvider.uriMatcher.match(uri)) {
+        return when (uriMatcher.match(uri)) {
             ARTWORK ->
                 // If the pattern is for artwork, returns the artwork content type.
                 MuzeiContract.Artwork.CONTENT_TYPE
@@ -126,7 +126,7 @@ class MuzeiProvider : ContentProvider() {
         }
     }
 
-    override fun insert(uri: Uri, values: ContentValues?): Uri? {
+    override fun insert(uri: Uri, values: ContentValues?): Uri {
         throw UnsupportedOperationException("Inserts are not supported")
     }
 
@@ -151,14 +151,12 @@ class MuzeiProvider : ContentProvider() {
             Log.w(TAG, "Queries are not supported until the user is unlocked")
             return null
         }
-        return if (MuzeiProvider.uriMatcher.match(uri) == MuzeiProvider.ARTWORK ||
-                MuzeiProvider.uriMatcher.match(uri) == MuzeiProvider.ARTWORK_ID) {
-            queryArtwork(uri, projection, selection, selectionArgs, sortOrder)
-        } else if (MuzeiProvider.uriMatcher.match(uri) == MuzeiProvider.SOURCES ||
-                MuzeiProvider.uriMatcher.match(uri) == MuzeiProvider.SOURCE_ID) {
-            querySource(uri, projection)
-        } else {
-            throw IllegalArgumentException("Unknown URI $uri")
+        return when(uriMatcher.match(uri)) {
+            ARTWORK -> queryArtwork(uri, projection, selection, selectionArgs, sortOrder)
+            ARTWORK_ID -> queryArtwork(uri, projection, selection, selectionArgs, sortOrder)
+            SOURCES -> querySource(uri, projection)
+            SOURCE_ID -> querySource(uri, projection)
+            else -> throw IllegalArgumentException("Unknown URI $uri")
         }
     }
 
@@ -174,13 +172,13 @@ class MuzeiProvider : ContentProvider() {
         qb.columns(computeColumns(projection, allArtworkColumnProjectionMap))
         val provider = ensureBackground {
             MuzeiDatabase.getInstance(context).providerDao()
-                    .currentProviderBlocking
+                    .getCurrentProviderBlocking()
         }
         var finalSelection = provider?.run {
             DatabaseUtils.concatenateWhere(selection,
                     "providerAuthority = \"${provider.authority}\"")
         } ?: selection
-        if (MuzeiProvider.uriMatcher.match(uri) == ARTWORK_ID) {
+        if (uriMatcher.match(uri) == ARTWORK_ID) {
             // If the incoming URI is for a single artwork identified by its ID, appends "_ID = <artworkId>"
             // to the where clause, so that it selects that single piece of artwork
             finalSelection = DatabaseUtils.concatenateWhere(selection,
@@ -200,27 +198,27 @@ class MuzeiProvider : ContentProvider() {
         val c = MatrixCursor(projection)
         val currentProvider = ensureBackground {
             MuzeiDatabase.getInstance(context).providerDao()
-                    .currentProviderBlocking
+                    .getCurrentProviderBlocking()
         }
         currentProvider?.let { provider ->
             c.newRow().apply {
                 add(BaseColumns._ID, 0L)
-                add(MuzeiContract.Sources.COLUMN_NAME_COMPONENT_NAME, provider.authority)
-                add(MuzeiContract.Sources.COLUMN_NAME_IS_SELECTED, true)
+                add(MuzeiContract.Sources.COLUMN_NAME_AUTHORITY, provider.authority)
+                add("selected", true)
                 add(MuzeiContract.Sources.COLUMN_NAME_DESCRIPTION, runBlocking {
                     ProviderManager.getDescription(context, provider.authority)
                 })
-                add(MuzeiContract.Sources.COLUMN_NAME_WANTS_NETWORK_AVAILABLE, false)
+                add("network", false)
                 add(MuzeiContract.Sources.COLUMN_NAME_SUPPORTS_NEXT_ARTWORK_COMMAND,
                         provider.supportsNextArtwork)
-                add(MuzeiContract.Sources.COLUMN_NAME_COMMANDS, null)
+                add("commands", null)
             }
         }
         return c.apply { setNotificationUri(context.contentResolver, uri) }
     }
 
     private fun computeColumns(projectionIn: Array<String>?, projectionMap: Map<String, String>): Array<String> {
-        if (projectionIn != null && projectionIn.isNotEmpty()) {
+        if (!projectionIn.isNullOrEmpty()) {
             return projectionIn.map { userColumn ->
                 val column = projectionMap[userColumn]
                 when {
@@ -236,11 +234,10 @@ class MuzeiProvider : ContentProvider() {
 
     @Throws(FileNotFoundException::class)
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor? {
-        return if (MuzeiProvider.uriMatcher.match(uri) == MuzeiProvider.ARTWORK ||
-                MuzeiProvider.uriMatcher.match(uri) == MuzeiProvider.ARTWORK_ID) {
-            openFileArtwork(uri, mode)
-        } else {
-            throw IllegalArgumentException("Unknown URI $uri")
+        return when(uriMatcher.match(uri)) {
+            ARTWORK -> openFileArtwork(uri, mode)
+            ARTWORK_ID -> openFileArtwork(uri, mode)
+            else -> throw IllegalArgumentException("Unknown URI $uri")
         }
     }
 
@@ -254,8 +251,8 @@ class MuzeiProvider : ContentProvider() {
         }
         val artworkDao = MuzeiDatabase.getInstance(context).artworkDao()
         val artwork = ensureBackground {
-            when {
-                MuzeiProvider.uriMatcher.match(uri) == MuzeiProvider.ARTWORK -> artworkDao.currentArtworkBlocking
+            when (uriMatcher.match(uri)) {
+                ARTWORK -> artworkDao.getCurrentArtworkBlocking()
                 else -> artworkDao.getArtworkByIdBlocking(ContentUris.parseId(uri))
             }
         } ?: throw FileNotFoundException("Could not get artwork file for $uri")

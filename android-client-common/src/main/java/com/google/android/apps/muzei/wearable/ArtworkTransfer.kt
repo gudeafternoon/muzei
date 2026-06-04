@@ -16,8 +16,8 @@
 
 package com.google.android.apps.muzei.wearable
 
+import android.os.Bundle
 import androidx.core.net.toUri
-import androidx.core.os.bundleOf
 import com.google.android.apps.muzei.room.Artwork
 import com.google.android.gms.wearable.DataMap
 
@@ -32,11 +32,12 @@ private const val KEY_ATTRIBUTION = "attribution"
  * @return a serialized version of the artwork.
  * @see toArtwork
  */
-fun Artwork.toDataMap(): DataMap = DataMap.fromBundle(bundleOf(
-        KEY_IMAGE_URI to imageUri.toString(),
-        KEY_TITLE to title,
-        KEY_BYLINE to byline,
-        KEY_ATTRIBUTION to attribution))
+fun Artwork.toDataMap(): DataMap = DataMap.fromBundle(Bundle().apply {
+    putString(KEY_IMAGE_URI, imageUri.toString())
+    putString(KEY_TITLE, title)
+    putString(KEY_BYLINE, byline)
+    putString(KEY_ATTRIBUTION, attribution)
+})
 
 /**
  * Deserializes an artwork object from a [DataMap].
@@ -46,13 +47,10 @@ fun Artwork.toDataMap(): DataMap = DataMap.fromBundle(bundleOf(
  */
 fun DataMap.toArtwork(): com.google.android.apps.muzei.api.provider.Artwork {
     val bundle = toBundle()
-    return com.google.android.apps.muzei.api.provider.Artwork().apply {
-        val imageUri = bundle.getString(KEY_IMAGE_URI)
-        if (imageUri != null && !imageUri.isBlank()) {
-            persistentUri = imageUri.toUri()
-        }
-        title = bundle.getString(KEY_TITLE)
-        byline = bundle.getString(KEY_BYLINE)
-        attribution = bundle.getString(KEY_ATTRIBUTION)
-    }
+    return com.google.android.apps.muzei.api.provider.Artwork(
+            persistentUri = bundle.getString(KEY_IMAGE_URI)?.takeUnless { it.isBlank() }?.toUri(),
+            title = bundle.getString(KEY_TITLE),
+            byline = bundle.getString(KEY_BYLINE),
+            attribution = bundle.getString(KEY_ATTRIBUTION)
+    )
 }

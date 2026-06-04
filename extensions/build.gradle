@@ -14,23 +14,29 @@
  * limitations under the License.
  */
 
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 apply plugin: 'com.android.library'
-apply plugin: 'kotlin-android'
 
 dependencies {
-    implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlinVersion"
-    api "org.jetbrains.kotlinx:kotlinx-coroutines-core:$coroutinesVersion"
-    api "org.jetbrains.kotlinx:kotlinx-coroutines-android:$coroutinesVersion"
-    implementation "androidx.lifecycle:lifecycle-common-java8:$lifecycleVersion"
-    api "androidx.lifecycle:lifecycle-livedata-core-ktx:$lifecycleVersion"
+    api libs.coroutines.core
+    api libs.coroutines.android
+    api libs.core
+    api libs.lifecycle.runtime
+    api libs.activity
+    implementation platform(libs.compose.bom)
+    implementation libs.compose.material3
+    implementation libs.compose.ui.tooling.preview
+    debugImplementation libs.compose.ui.tooling.runtime
 }
 
 android {
-    compileSdkVersion rootProject.ext.compileSdkVersion
+    namespace 'net.nurik.roman.muzei.extensions'
+    compileSdk libs.versions.compileSdk.get().toInteger()
 
     defaultConfig {
-        minSdkVersion 19
-        targetSdkVersion rootProject.ext.targetSdkVersion
+        minSdkVersion 23
+        targetSdkVersion libs.versions.targetSdk.get()
     }
 
     buildTypes {
@@ -38,8 +44,14 @@ android {
         publicDebug
     }
 
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(JvmTarget.JVM_11)
+            freeCompilerArgs.add("-opt-in=kotlin.RequiresOptIn")
+        }
+    }
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
     }
 }

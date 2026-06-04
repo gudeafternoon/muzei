@@ -20,32 +20,36 @@ import android.content.Context
 import androidx.lifecycle.LifecycleOwner
 import com.google.android.apps.muzei.api.MuzeiContract
 import com.google.android.apps.muzei.room.MuzeiDatabase
-import com.google.android.apps.muzei.util.observeNonNull
+import com.google.android.apps.muzei.room.contentUri
+import com.google.android.apps.muzei.util.collectIn
+import kotlinx.coroutines.flow.filterNotNull
 
 class RealRenderController(
         context: Context,
         renderer: MuzeiBlurRenderer,
-        callbacks: RenderController.Callbacks
+        callbacks: Callbacks
 ) : RenderController(context, renderer, callbacks) {
 
-    private val artworkLiveData = MuzeiDatabase.getInstance(context)
-            .artworkDao().currentArtwork
+    /**
+     * If there's no artwork yet (as is the case when in Direct Boot), then we
+     * use [MuzeiContract.Artwork.CONTENT_URI].
+     */
+    private var currentArtworkUri = MuzeiContract.Artwork.CONTENT_URI
 
     override fun onCreate(owner: LifecycleOwner) {
         super.onCreate(owner)
-        artworkLiveData.observeNonNull(owner) {
-            reloadCurrentArtwork()
-        }
         reloadCurrentArtwork()
     }
 
-    /**
-     * Create a [ImageLoader] for the current artwork. If [artworkLiveData]
-     * doesn't have artwork yet (as is the case when in Direct Boot), then we
-     * use [MuzeiContract.Artwork.CONTENT_URI].
-     */
+    override fun onStart(owner: LifecycleOwner) {
+        super.onStart(owner)
+        val database = MuzeiDatabase.getInstance(context)
+        database.artworkDao().getCurrentArtworkFlow().filterNotNull().collectIn(owner) { artwork ->
+            currentArtworkUri = artwork.contentUri
+            reloadCurrentArtwork()
+        }
+    }
+
     override suspend fun openDownloadedCurrentArtwork() =
-            ContentUriImageLoader(context.contentResolver,
-                    artworkLiveData.value?.contentUri
-                            ?: MuzeiContract.Artwork.CONTENT_URI)
+            ContentUriImageLoader(context.contentResolver, currentArtworkUri)
 }

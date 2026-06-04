@@ -16,11 +16,15 @@
 
 <manifest
     xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools"
-    package="net.nurik.roman.muzei.androidclientcommon">
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Used to restart jobs listening for MuzeiArtProvider changes on boot -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+
+    <!-- Remove unused foreground service permission auto-added by WorkManager -->
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE"
+        tools:node="remove" />
 
     <permission
         android:name="com.google.android.apps.muzei.api.ACCESS_PROVIDER"
@@ -31,6 +35,18 @@
         android:name="com.google.android.apps.muzei.WRITE_PROVIDER"
         android:protectionLevel="signature"/>
     <uses-permission android:name="com.google.android.apps.muzei.WRITE_PROVIDER"/>
+
+    <queries>
+        <!-- Used to migrate legacy sources to their replacement MuzeiArtProvider -->
+        <intent>
+            <action android:name="com.google.android.apps.muzei.api.MuzeiArtSource"/>
+        </intent>
+
+        <!-- Used to build the list of installed providers -->
+        <intent>
+            <action android:name="com.google.android.apps.muzei.api.MuzeiArtProvider" />
+        </intent>
+    </queries>
 
     <application>
         <provider
@@ -54,19 +70,19 @@
 
         <!-- Disable the default WOrkManagerInitializer and create our own -->
         <provider
-            android:name="androidx.work.impl.WorkManagerInitializer"
-            android:authorities="${applicationId}.workmanager-init"
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
             android:exported="false"
-            android:multiprocess="true"
             android:directBootAware="false"
             tools:targetApi="n"
-            tools:node="remove"/>
-        <provider
-            android:authorities="${applicationId}.work-init"
-            android:name="com.google.android.apps.muzei.WorkManagerInitializer"
-            android:exported="false"
-            android:multiprocess="true"
-            android:directBootAware="false"
-            tools:targetApi="n"/>
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.work.WorkManagerInitializer"
+                android:value="androidx.startup"
+                tools:node="remove" />
+            <meta-data
+                android:name="com.google.android.apps.muzei.WorkManagerInitializer"
+                android:value="androidx.startup" />
+        </provider>
     </application>
 </manifest>

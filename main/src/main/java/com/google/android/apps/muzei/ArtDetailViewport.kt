@@ -17,27 +17,23 @@
 package com.google.android.apps.muzei
 
 import android.graphics.RectF
-import androidx.lifecycle.MutableLiveData
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 
 // Singleton that can be observed
 object ArtDetailViewport {
     private val viewport0 = RectF()
     private val viewport1 = RectF()
-    private val observers = mutableListOf<(isFromUser: Boolean) -> Unit>()
-    private val changeLiveData = MutableLiveData<Boolean>().apply {
-        // Make sure we trigger observers on the main thread
-        observeForever { isFromUser ->
-            observers.forEach { it.invoke(isFromUser == true) }
-        }
-    }
+    private val changes = MutableSharedFlow<Boolean>(
+            extraBufferCapacity = 1,
+            onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
-    fun addObserver(observer: (isFromUser: Boolean) -> Unit) {
-        observers.add(observer)
-    }
-
-    fun removeObserver(observer: (isFromUser: Boolean) -> Unit) {
-        observers.remove(observer)
-    }
+    /**
+     * Get a [Flow] for listening for viewport change events.
+     * The boolean indicates whether the change was triggered directly by a user interaction.
+     */
+    fun getChanges(): Flow<Boolean> = changes
 
     fun getViewport(id: Int): RectF {
         return if (id == 0) viewport0 else viewport1
@@ -57,7 +53,7 @@ object ArtDetailViewport {
             isFromUser: Boolean = false
     ) {
         getViewport(id).set(left, top, right, bottom)
-        changeLiveData.postValue(isFromUser)
+        changes.tryEmit(isFromUser)
     }
 
     fun setDefaultViewport(
@@ -78,7 +74,7 @@ object ArtDetailViewport {
                     1f,
                     0.5f + bitmapAspectRatio / screenAspectRatio / 2f)
         }
-        changeLiveData.postValue(false)
+        changes.tryEmit(false)
         return this
     }
 }

@@ -16,55 +16,88 @@
 
 package com.google.android.apps.muzei
 
+import android.app.Activity
 import android.app.Application
 import android.app.Notification
 import android.content.SharedPreferences
 import android.os.Bundle
-import android.preference.PreferenceManager
 import android.view.View
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.os.bundleOf
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.FragmentTransaction
 import androidx.fragment.app.commit
 import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.LiveData
-import androidx.lifecycle.MutableLiveData
-import androidx.lifecycle.observe
+import androidx.preference.PreferenceManager
 import com.google.android.apps.muzei.notifications.NotificationSettingsDialogFragment
+import com.google.android.apps.muzei.render.MuzeiRendererFragment
+import com.google.android.apps.muzei.settings.EffectsFragment
+import com.google.android.apps.muzei.util.collectIn
 import com.google.android.apps.muzei.wallpaper.WallpaperActiveState
+import com.google.android.apps.muzei.wallpaper.initializeWallpaperActiveState
+import com.google.firebase.Firebase
 import com.google.firebase.analytics.FirebaseAnalytics
+import com.google.firebase.analytics.analytics
+import com.google.firebase.analytics.logEvent
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
 import net.nurik.roman.muzei.BuildConfig
 import net.nurik.roman.muzei.R
+import net.nurik.roman.muzei.databinding.MuzeiActivityBinding
+
+private const val PREVIEW_MODE = "android.service.wallpaper.PREVIEW_MODE"
+val Activity.isPreviewMode get() = intent?.extras?.getBoolean(PREVIEW_MODE) == true
 
 class MuzeiActivity : AppCompatActivity() {
+    private lateinit var binding: MuzeiActivityBinding
     private var fadeIn = false
+    private var renderLocally = false
     private val viewModel : MuzeiActivityViewModel by viewModels()
 
     private val currentFragment: Fragment
         get() {
             val sp = PreferenceManager.getDefaultSharedPreferences(this)
             val seenTutorial = sp.getBoolean(TutorialFragment.PREF_SEEN_TUTORIAL, false)
-            when {
-                WallpaperActiveState.value == true && seenTutorial -> {
+            return when {
+                WallpaperActiveState.value && seenTutorial -> {
                     // The wallpaper is active and they've seen the tutorial
-                    FirebaseAnalytics.getInstance(this).setCurrentScreen(this, "Main",
-                            MainFragment::class.java.simpleName)
-                    return MainFragment()
+                    Firebase.analytics.logEvent(FirebaseAnalytics.Event.SCREEN_VIEW) {
+                        param(FirebaseAnalytics.Param.SCREEN_NAME, "Main")
+                        param(FirebaseAnalytics.Param.SCREEN_CLASS,
+                                MainFragment::class.java.simpleName)
+                    }
+                    MainFragment()
                 }
-                WallpaperActiveState.value == true && !seenTutorial -> {
+                WallpaperActiveState.value && !seenTutorial -> {
                     // They need to see the tutorial after activating Muzei for the first time
-                    FirebaseAnalytics.getInstance(this).setCurrentScreen(this, "Tutorial",
-                            TutorialFragment::class.java.simpleName)
-                    return TutorialFragment()
+                    Firebase.analytics.logEvent(FirebaseAnalytics.Event.SCREEN_VIEW) {
+                        param(FirebaseAnalytics.Param.SCREEN_NAME, "Tutorial")
+                        param(FirebaseAnalytics.Param.SCREEN_CLASS,
+                                TutorialFragment::class.java.simpleName)
+                    }
+                    TutorialFragment()
+                }
+                isPreviewMode -> {
+                    // We're previewing the wallpaper and want to adjust its settings
+                    Firebase.analytics.logEvent(FirebaseAnalytics.Event.SCREEN_VIEW) {
+                        param(FirebaseAnalytics.Param.SCREEN_NAME, "Effects")
+                        param(FirebaseAnalytics.Param.SCREEN_CLASS,
+                                EffectsFragment::class.java.simpleName)
+                    }
+                    EffectsFragment()
                 }
                 else -> {
                     // Show the intro fragment to have them activate Muzei
-                    FirebaseAnalytics.getInstance(this).setCurrentScreen(this, "Intro",
-                            IntroFragment::class.java.simpleName)
-                    return IntroFragment()
+                    Firebase.analytics.logEvent(FirebaseAnalytics.Event.SCREEN_VIEW) {
+                        param(FirebaseAnalytics.Param.SCREEN_NAME, "Intro")
+                        param(FirebaseAnalytics.Param.SCREEN_CLASS,
+                                IntroFragment::class.java.simpleName)
+                    }
+                    IntroFragment()
                 }
+            }.also {
+                updateRenderLocally(it is EffectsFragment)
             }
         }
 
@@ -73,25 +106,27 @@ class MuzeiActivity : AppCompatActivity() {
         if (MissingResourcesDialogFragment.showDialogIfNeeded(this)) {
             return
         }
-        setContentView(R.layout.muzei_activity)
-        FirebaseAnalytics.getInstance(this).setUserProperty("device_type", BuildConfig.DEVICE_TYPE)
-        val containerView = findViewById<View>(R.id.container)
+        binding = MuzeiActivityBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+        Firebase.analytics.setUserProperty("device_type", BuildConfig.DEVICE_TYPE)
 
-        containerView.systemUiVisibility = (View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+        @Suppress("DEPRECATION")
+        binding.container.systemUiVisibility = (View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
                 or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
                 or View.SYSTEM_UI_FLAG_LAYOUT_STABLE)
 
         if (savedInstanceState == null) {
-            WallpaperActiveState.initState(this)
+            initializeWallpaperActiveState(this)
             fadeIn = true
         }
 
-        WallpaperActiveState.observe(this) {
+        WallpaperActiveState.collectIn(this) {
             val fragment = currentFragment
-            val oldFragment = supportFragmentManager.findFragmentById(R.id.container)
+            val oldFragment = binding.container.getFragment<Fragment?>()
             if (!fragment::class.java.isInstance(oldFragment)) {
                 // Only replace the Fragment if there was a change
                 supportFragmentManager.commit {
+                    setReorderingAllowed(true)
                     replace(R.id.container, fragment)
                     setPrimaryNavigationFragment(fragment).apply {
                         if (oldFragment != null) {
@@ -102,12 +137,12 @@ class MuzeiActivity : AppCompatActivity() {
             }
         }
 
-        viewModel.seenTutorialLiveData.observe(this) {
+        viewModel.onSeenTutorial().collectIn(this) {
             val fragment = currentFragment
-            if (!fragment::class.java.isInstance(
-                            supportFragmentManager.findFragmentById(R.id.container))) {
+            if (!fragment::class.java.isInstance(binding.container.getFragment())) {
                 // Only replace the Fragment if there was a change
-                supportFragmentManager.commit(allowStateLoss = true) {
+                supportFragmentManager.commit {
+                    setReorderingAllowed(true)
                     replace(R.id.container, fragment)
                     setPrimaryNavigationFragment(fragment)
                     setTransition(FragmentTransaction.TRANSIT_FRAGMENT_FADE)
@@ -115,9 +150,9 @@ class MuzeiActivity : AppCompatActivity() {
             }
         }
         if (intent?.hasCategory(Notification.INTENT_CATEGORY_NOTIFICATION_PREFERENCES) == true) {
-            FirebaseAnalytics.getInstance(this).logEvent(
-                    "notification_settings_open", bundleOf(
-                    FirebaseAnalytics.Param.CONTENT_TYPE to "intent"))
+            Firebase.analytics.logEvent("notification_settings_open") {
+                param(FirebaseAnalytics.Param.CONTENT_TYPE, "intent")
+            }
             NotificationSettingsDialogFragment.showSettings(this,
                     supportFragmentManager)
         }
@@ -140,26 +175,48 @@ class MuzeiActivity : AppCompatActivity() {
             fadeIn = false
         }
     }
+
+    private fun updateRenderLocally(renderLocally: Boolean) {
+        if (this.renderLocally == renderLocally) {
+            return
+        }
+
+        this.renderLocally = renderLocally
+
+        val fm = supportFragmentManager
+        val localRenderFragment = binding.localRenderContainer.getFragment<MuzeiRendererFragment?>()
+        if (renderLocally) {
+            if (localRenderFragment == null) {
+                fm.commit {
+                    setReorderingAllowed(true)
+                    add(R.id.local_render_container,
+                            MuzeiRendererFragment.createInstance(false))
+                }
+            }
+        } else {
+            if (localRenderFragment != null) {
+                fm.commit {
+                    setReorderingAllowed(true)
+                    remove(localRenderFragment)
+                }
+            }
+        }
+    }
 }
 
 class MuzeiActivityViewModel(application: Application): AndroidViewModel(application) {
+    private val sp: SharedPreferences = PreferenceManager.getDefaultSharedPreferences(application)
 
-    internal val seenTutorialLiveData : LiveData<Boolean> = object : MutableLiveData<Boolean>(),
-            SharedPreferences.OnSharedPreferenceChangeListener {
-        val sp = PreferenceManager.getDefaultSharedPreferences(application)
-
-        override fun onActive() {
-            sp.registerOnSharedPreferenceChangeListener(this)
-        }
-
-        override fun onSharedPreferenceChanged(sharedPreferences: SharedPreferences, key: String) {
+    fun onSeenTutorial(): Flow<Boolean> = callbackFlow {
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
             if (TutorialFragment.PREF_SEEN_TUTORIAL == key) {
-                value = sp.getBoolean(TutorialFragment.PREF_SEEN_TUTORIAL, false)
+                trySend(sp.getBoolean(TutorialFragment.PREF_SEEN_TUTORIAL, false))
             }
         }
+        sp.registerOnSharedPreferenceChangeListener(listener)
 
-        override fun onInactive() {
-            sp.unregisterOnSharedPreferenceChangeListener(this)
+        awaitClose {
+            sp.unregisterOnSharedPreferenceChangeListener(listener)
         }
     }
 }

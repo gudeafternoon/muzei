@@ -24,21 +24,20 @@ import androidx.lifecycle.LifecycleOwner
 import com.google.android.apps.muzei.render.ImageLoader
 import com.google.android.apps.muzei.room.Artwork
 import com.google.android.apps.muzei.room.MuzeiDatabase
-import com.google.android.apps.muzei.util.observeNonNull
+import com.google.android.apps.muzei.room.contentUri
+import com.google.android.apps.muzei.util.collectIn
 import com.google.android.gms.common.ConnectionResult
 import com.google.android.gms.common.GoogleApiAvailability
 import com.google.android.gms.common.api.AvailabilityException
-import com.google.android.gms.tasks.Tasks
 import com.google.android.gms.wearable.Asset
-import com.google.android.gms.wearable.DataItem
 import com.google.android.gms.wearable.PutDataMapRequest
 import com.google.android.gms.wearable.Wearable
-import kotlinx.coroutines.GlobalScope
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
-import java.util.concurrent.ExecutionException
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.TimeoutException
 
 /**
  * Controller for updating Android Wear devices with new wallpapers.
@@ -51,57 +50,46 @@ class WearableController(private val context: Context) : DefaultLifecycleObserve
 
     override fun onCreate(owner: LifecycleOwner) {
         // Update Android Wear whenever the artwork changes
-        MuzeiDatabase.getInstance(context).artworkDao().currentArtwork
-                .observeNonNull(owner) { artwork ->
-                    GlobalScope.launch {
-                        updateArtwork(artwork)
-                    }
-                }
+        val database = MuzeiDatabase.getInstance(context)
+        database.artworkDao().getCurrentArtworkFlow().filterNotNull().collectIn(owner) { artwork ->
+            updateArtwork(artwork)
+        }
     }
 
-    private suspend fun updateArtwork(artwork: Artwork) {
+    private suspend fun updateArtwork(artwork: Artwork) = withContext(NonCancellable) {
         if (ConnectionResult.SUCCESS != GoogleApiAvailability.getInstance().isGooglePlayServicesAvailable(context)) {
-            return
+            return@withContext
         }
         val dataClient = Wearable.getDataClient(context)
         try {
-            Tasks.await(GoogleApiAvailability.getInstance()
-                    .checkApiAvailability(dataClient), 5, TimeUnit.SECONDS)
-        } catch (e: ExecutionException) {
-            if (e.cause is AvailabilityException) {
-                val connectionResult = (e.cause as AvailabilityException)
-                        .getConnectionResult(dataClient)
-                if (connectionResult.errorCode != ConnectionResult.API_UNAVAILABLE) {
-                    Log.w(TAG, "onConnectionFailed: $connectionResult", e.cause)
-                }
-            } else {
-                Log.w(TAG, "Unable to check for Wear API availability", e)
+            GoogleApiAvailability.getInstance().checkApiAvailability(dataClient).await()
+        } catch (e: AvailabilityException) {
+            val connectionResult = e.getConnectionResult(dataClient)
+            if (connectionResult.errorCode != ConnectionResult.API_UNAVAILABLE) {
+                Log.w(TAG, "onConnectionFailed: $connectionResult", e.cause)
             }
-            return
-        } catch (e: InterruptedException) {
+            return@withContext
+        } catch (e: Exception) {
             Log.w(TAG, "Unable to check for Wear API availability", e)
-            return
-        } catch (e: TimeoutException) {
-            Log.w(TAG, "Unable to check for Wear API availability", e)
-            return
+            return@withContext
         }
 
         val image: Bitmap = ImageLoader.decode(
                 context.contentResolver, artwork.contentUri,
-                320) ?: return
+                320) ?: return@withContext
 
-        val byteStream = ByteArrayOutputStream()
-        image.compress(Bitmap.CompressFormat.PNG, 100, byteStream)
-        val asset = Asset.createFromBytes(byteStream.toByteArray())
+        val asset = withContext(Dispatchers.IO) {
+            val byteStream = ByteArrayOutputStream()
+            image.compress(Bitmap.CompressFormat.PNG, 100, byteStream)
+            Asset.createFromBytes(byteStream.toByteArray())
+        }
         val dataMapRequest = PutDataMapRequest.create("/artwork").apply {
             dataMap.putDataMap("artwork", artwork.toDataMap())
             dataMap.putAsset("image", asset)
         }
         try {
-            Tasks.await<DataItem>(dataClient.putDataItem(dataMapRequest.asPutDataRequest().setUrgent()))
-        } catch (e: ExecutionException) {
-            Log.w(TAG, "Error uploading artwork to Wear", e)
-        } catch (e: InterruptedException) {
+            dataClient.putDataItem(dataMapRequest.asPutDataRequest().setUrgent()).await()
+        } catch (e: Exception) {
             Log.w(TAG, "Error uploading artwork to Wear", e)
         }
     }

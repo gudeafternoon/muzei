@@ -21,24 +21,25 @@ import android.content.ActivityNotFoundException
 import android.content.DialogInterface
 import android.content.Intent
 import android.content.res.Resources
-import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
-import androidx.appcompat.app.AlertDialog
 import androidx.core.content.ContextCompat
+import androidx.core.net.toUri
 import androidx.fragment.app.DialogFragment
 import androidx.fragment.app.FragmentActivity
 import com.google.android.apps.muzei.util.toast
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import net.nurik.roman.muzei.R
+import net.nurik.roman.muzei.androidclientcommon.R as CommonR
 
 class MissingResourcesDialogFragment : DialogFragment() {
     companion object {
         fun showDialogIfNeeded(activity: FragmentActivity) : Boolean {
             val missingResources = try {
-                ContextCompat.getDrawable(activity, R.drawable.ic_stat_muzei)
-                ContextCompat.getDrawable(activity, R.drawable.logo_subtitle)
+                ContextCompat.getDrawable(activity, CommonR.drawable.ic_stat_muzei)
+                ContextCompat.getDrawable(activity, R.drawable.about_android_experiment)
                 false
-            } catch (e : Resources.NotFoundException) {
+            } catch (_ : Resources.NotFoundException) {
                 true
             }
             if (missingResources) {
@@ -50,18 +51,18 @@ class MissingResourcesDialogFragment : DialogFragment() {
     }
 
     override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
-        return AlertDialog.Builder(requireContext())
+        return MaterialAlertDialogBuilder(requireContext())
                 .setTitle(R.string.missing_resources_title)
                 .setMessage(R.string.missing_resources_message)
                 .setPositiveButton(R.string.missing_resources_open) { _: DialogInterface, _: Int ->
                     try {
                         val playStoreIntent = Intent(Intent.ACTION_VIEW,
-                                Uri.parse("https://play.google.com/store/apps/details?id=" +
-                                        requireContext().packageName))
+                            ("https://play.google.com/store/apps/details?id=" +
+                                    requireContext().packageName).toUri())
                         startActivity(playStoreIntent)
-                    } catch (e: ActivityNotFoundException) {
+                    } catch (_: ActivityNotFoundException) {
                         requireContext().toast(R.string.play_store_not_found, Toast.LENGTH_LONG)
-                    } catch (e: SecurityException) {
+                    } catch (_: SecurityException) {
                         requireContext().toast(R.string.play_store_not_found, Toast.LENGTH_LONG)
                     }
                     requireActivity().finish()
@@ -70,5 +71,10 @@ class MissingResourcesDialogFragment : DialogFragment() {
                     requireActivity().finish()
                 }
                 .create()
+    }
+
+    override fun onDismiss(dialog: DialogInterface) {
+        super.onDismiss(dialog)
+        requireActivity().finish()
     }
 }

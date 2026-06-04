@@ -20,8 +20,7 @@ import androidx.lifecycle.LiveData
 import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.Query
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.Flow
 
 /**
  * Dao for Artwork
@@ -32,39 +31,54 @@ abstract class ArtworkDao {
     @Query("SELECT * FROM artwork ORDER BY date_added DESC LIMIT 100")
     abstract suspend fun getArtwork(): List<Artwork>
 
-    @get:Query("SELECT artwork.* FROM artwork " +
-            "inner join provider on providerAuthority = authority " +
-            "ORDER BY date_added DESC")
-    abstract val currentArtwork: LiveData<Artwork?>
+    @Query("""
+        SELECT artwork.* FROM artwork 
+        inner join provider on providerAuthority = authority
+        ORDER BY date_added DESC""")
+    abstract fun getCurrentArtworkFlow(): Flow<Artwork?>
 
-    @get:Query("SELECT artwork.* FROM artwork " +
-            "inner join provider on providerAuthority = authority " +
-            "ORDER BY date_added DESC")
-    internal abstract val currentArtworkBlocking: Artwork?
+    @Query("""
+        SELECT artwork.* FROM artwork
+        inner join provider on providerAuthority = authority
+        ORDER BY date_added DESC""")
+    abstract fun getCurrentArtworkLiveData(): LiveData<Artwork?>
 
-    suspend fun getCurrentArtwork() = withContext(Dispatchers.Default) {
-        currentArtworkBlocking
-    }
+    @Query("""
+        SELECT artwork.* FROM artwork
+        inner join provider on providerAuthority = authority
+        ORDER BY date_added DESC""")
+    internal abstract fun getCurrentArtworkBlocking(): Artwork?
+
+    @Query("""
+        SELECT artwork.* FROM artwork
+        inner join provider on providerAuthority = authority
+        ORDER BY date_added DESC""")
+    abstract suspend fun getCurrentArtwork(): Artwork?
 
     @Insert
     abstract suspend fun insert(artwork: Artwork): Long
 
-    @Query("SELECT * FROM artwork WHERE providerAuthority = :providerAuthority ORDER BY date_added DESC")
+    @Query("""
+        SELECT * FROM artwork
+        WHERE providerAuthority = :providerAuthority
+        ORDER BY date_added DESC""")
     abstract suspend fun getCurrentArtworkForProvider(providerAuthority: String): Artwork?
 
-    @get:Query("SELECT * FROM artwork art1 WHERE _id IN (" +
-            "SELECT _id FROM artwork art2 WHERE art1._id=art2._id " +
-            "ORDER BY date_added DESC limit 1)")
-    abstract val currentArtworkByProvider : LiveData<List<Artwork>>
+    @Query("""
+        SELECT art1.* FROM artwork art1,
+        (SELECT _id, max(date_added) FROM artwork GROUP BY providerAuthority) as art2
+        WHERE art1._id=art2._id""")
+    abstract fun getCurrentArtworkByProvider(): Flow<List<Artwork>>
 
     @Query("SELECT * FROM artwork WHERE _id=:id")
     internal abstract fun getArtworkByIdBlocking(id: Long): Artwork?
 
-    suspend fun getArtworkById(id: Long) = withContext(Dispatchers.Default) {
-        getArtworkByIdBlocking(id)
-    }
+    @Query("SELECT * FROM artwork WHERE _id=:id")
+    abstract suspend fun getArtworkById(id: Long): Artwork?
 
-    @Query("SELECT * FROM artwork WHERE title LIKE :query OR byline LIKE :query OR attribution LIKE :query")
+    @Query("""
+        SELECT * FROM artwork
+        WHERE title LIKE :query OR byline LIKE :query OR attribution LIKE :query""")
     abstract suspend fun searchArtwork(query: String): List<Artwork>
 
     @Query("DELETE FROM artwork WHERE _id=:id")

@@ -17,11 +17,11 @@
 package com.google.android.apps.muzei.featuredart
 
 import android.content.Context
-import android.preference.PreferenceManager
 import android.text.format.DateUtils
 import android.util.Log
 import androidx.core.content.edit
 import androidx.core.net.toUri
+import androidx.preference.PreferenceManager
 import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingWorkPolicy
@@ -33,20 +33,22 @@ import com.google.android.apps.muzei.api.provider.Artwork
 import com.google.android.apps.muzei.api.provider.ProviderContract
 import com.google.android.apps.muzei.featuredart.BuildConfig.FEATURED_ART_AUTHORITY
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONException
 import org.json.JSONObject
 import org.json.JSONTokener
+import ru.gildor.coroutines.okhttp.await
 import java.io.IOException
 import java.text.ParseException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.Random
 import java.util.TimeZone
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import kotlin.random.Random
 
 class FeaturedArtWorker(
         context: Context,
@@ -57,7 +59,7 @@ class FeaturedArtWorker(
         private const val TAG = "FeaturedArtWorker"
         private const val PREF_NEXT_UPDATE_MILLIS = "next_update_millis"
 
-        private const val QUERY_URL = "https://muzeiapi.appspot.com/featured?cachebust=1"
+        private const val QUERY_URL = "https://muzei.co/featured?cachebust=1"
 
         private const val KEY_IMAGE_URI = "imageUri"
         private const val KEY_TITLE = "title"
@@ -66,8 +68,6 @@ class FeaturedArtWorker(
         private const val KEY_TOKEN = "token"
         private const val KEY_DETAILS_URI = "detailsUri"
         private const val MAX_JITTER_MILLIS = 20 * 60 * 1000
-
-        private val RANDOM = Random()
 
         private val DATE_FORMAT_TZ = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssZ", Locale.US)
         private val DATE_FORMAT_LOCAL = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US)
@@ -94,7 +94,7 @@ class FeaturedArtWorker(
                 Log.d(TAG, "Enqueuing next artwork with delay of " +
                     DateUtils.formatElapsedTime(TimeUnit.MILLISECONDS.toSeconds(delay)))
             }
-            val workManager = WorkManager.getInstance()
+            val workManager = WorkManager.getInstance(context)
             workManager.enqueueUniqueWork(
                     TAG,
                     ExistingWorkPolicy.REPLACE,
@@ -107,21 +107,18 @@ class FeaturedArtWorker(
         }
     }
 
-    override val coroutineContext = SINGLE_THREAD_CONTEXT
-
-    override suspend fun doWork(): Result {
+    override suspend fun doWork() = withContext(SINGLE_THREAD_CONTEXT) {
         val jsonObject: JSONObject?
         try {
             jsonObject = fetchJsonObject(QUERY_URL)
-            val imageUri = jsonObject.optString(KEY_IMAGE_URI) ?: return Result.success()
-            val artwork = Artwork().apply {
-                persistentUri = imageUri.toUri()
-                token = jsonObject.optString(KEY_TOKEN).takeUnless { it.isEmpty() } ?: imageUri
-                title = jsonObject.optString(KEY_TITLE)
-                byline = jsonObject.optString(KEY_BYLINE)
-                attribution = jsonObject.optString(KEY_ATTRIBUTION)
-                webUri = jsonObject.optString(KEY_DETAILS_URI)?.toUri()
-            }
+            val imageUri = jsonObject.optString(KEY_IMAGE_URI) ?: return@withContext Result.success()
+            val artwork = Artwork(
+                persistentUri = imageUri.toUri(),
+                token = jsonObject.optString(KEY_TOKEN).takeUnless { it.isEmpty() } ?: imageUri,
+                title = jsonObject.optString(KEY_TITLE),
+                byline = jsonObject.optString(KEY_BYLINE),
+                attribution = jsonObject.optString(KEY_ATTRIBUTION),
+                webUri = jsonObject.optString(KEY_DETAILS_URI).takeUnless { it.isEmpty() }?.toUri())
 
             if (BuildConfig.DEBUG) {
                 Log.d(TAG, "Adding new artwork: $imageUri")
@@ -130,13 +127,13 @@ class FeaturedArtWorker(
                     .addArtwork(artwork)
         } catch (e: JSONException) {
             Log.e(TAG, "Error reading JSON", e)
-            return Result.retry()
+            return@withContext Result.retry()
         } catch (e: IOException) {
             Log.e(TAG, "Error reading JSON", e)
-            return Result.retry()
+            return@withContext Result.retry()
         }
 
-        val nextTime: Date? = jsonObject.optString("nextTime")?.takeUnless {
+        val nextTime: Date? = jsonObject.optString("nextTime").takeUnless {
             it.isEmpty()
         }?.run {
             if (length > 4 && this[length - 3] == ':') {
@@ -148,7 +145,7 @@ class FeaturedArtWorker(
             // Parse the nextTime
             try {
                 DATE_FORMAT_TZ.parse(this)
-            } catch (e: ParseException) {
+            } catch (_: ParseException) {
                 try {
                     DATE_FORMAT_LOCAL.apply {
                         timeZone = TimeZone.getDefault()
@@ -161,26 +158,25 @@ class FeaturedArtWorker(
         }
 
         val nextUpdateMillis = if (nextTime != null)
-            nextTime.time + RANDOM.nextInt(MAX_JITTER_MILLIS) // jitter by up to N milliseconds
+            nextTime.time + Random.nextInt(MAX_JITTER_MILLIS) // jitter by up to N milliseconds
         else
             System.currentTimeMillis() + 12 * 60 * 60 * 1000 // No next time, default to checking in 12 hours
         val sp = PreferenceManager.getDefaultSharedPreferences(applicationContext)
         sp.edit {
             putLong(PREF_NEXT_UPDATE_MILLIS, nextUpdateMillis)
         }
-        return Result.success()
+        Result.success()
     }
 
     @Throws(IOException::class, JSONException::class)
-    private fun fetchJsonObject(url: String): JSONObject {
+    private suspend fun fetchJsonObject(url: String): JSONObject {
         val client = OkHttpClient.Builder().build()
 
         val request = Request.Builder()
                 .url(url)
                 .build()
-        val json = client.newCall(request).execute().body()?.string()
+        val json = client.newCall(request).await().body.string()
         val tokener = JSONTokener(json)
         return tokener.nextValue() as? JSONObject ?: throw JSONException("Expected JSON object.")
     }
 }
-

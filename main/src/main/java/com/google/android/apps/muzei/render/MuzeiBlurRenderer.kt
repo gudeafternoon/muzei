@@ -18,7 +18,6 @@ package com.google.android.apps.muzei.render
 
 import android.app.ActivityManager
 import android.content.Context
-import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.RectF
 import android.opengl.GLES20
@@ -27,7 +26,8 @@ import android.opengl.Matrix
 import android.util.Log
 import android.view.animation.AccelerateDecelerateInterpolator
 import androidx.annotation.Keep
-import androidx.lifecycle.MutableLiveData
+import androidx.core.graphics.scale
+import com.google.android.apps.muzei.ArtDetailOpen
 import com.google.android.apps.muzei.ArtDetailViewport
 import com.google.android.apps.muzei.settings.Prefs
 import com.google.android.apps.muzei.util.ImageBlurrer
@@ -37,18 +37,24 @@ import com.google.android.apps.muzei.util.floorEven
 import com.google.android.apps.muzei.util.interpolate
 import com.google.android.apps.muzei.util.roundMult4
 import com.google.android.apps.muzei.util.uninterpolate
+import kotlinx.coroutines.flow.MutableStateFlow
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
+import kotlin.math.ceil
+import kotlin.math.floor
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.sqrt
 
 sealed class SwitchingPhotos(val viewportId: Int)
 data class SwitchingPhotosInProgress(private val currentId: Int) : SwitchingPhotos(currentId)
 data class SwitchingPhotosDone(private val currentId: Int) : SwitchingPhotos(currentId)
 
-object SwitchingPhotosLiveData : MutableLiveData<SwitchingPhotos>()
+val SwitchingPhotosStateFlow = MutableStateFlow<SwitchingPhotos?>(null)
 
 data class ArtworkSize(val width: Int, val height: Int)
 
-object ArtworkSizeLiveData : MutableLiveData<ArtworkSize>()
+val ArtworkSizeStateFlow = MutableStateFlow<ArtworkSize?>(null)
 
 class MuzeiBlurRenderer(
         private val context: Context,
@@ -95,6 +101,8 @@ class MuzeiBlurRenderer(
 
     @Volatile
     private var normalOffsetX: Float = 0f
+    @Volatile
+    private var zoomAmount: Float = 1f
     private val currentViewport = RectF() // [-1, -1] to [1, 1], flipped
 
     var isBlurred = true
@@ -115,6 +123,7 @@ class MuzeiBlurRenderer(
         currentGLPictureSet = GLPictureSet(0)
         nextGLPictureSet = GLPictureSet(1) // for transitioning to next pictures
         setNormalOffsetX(0f)
+        setZoom(1f)
         recomputeMaxPrescaledBlurPixels()
         recomputeMaxDimAmount()
         recomputeGreyAmount()
@@ -238,6 +247,11 @@ class MuzeiBlurRenderer(
         onViewportChanged()
     }
 
+    fun setZoom(zoom: Float) {
+        zoomAmount = interpolate(1f, 1.1f, 1 - zoom.constrain(0f, 1f))
+        onViewportChanged()
+    }
+
     private fun onViewportChanged() {
         currentGLPictureSet.recomputeTransformMatrices()
         nextGLPictureSet.recomputeTransformMatrices()
@@ -250,13 +264,13 @@ class MuzeiBlurRenderer(
         return maxPrescaledBlurPixels * blurInterpolator.getInterpolation(f / blurKeyframes)
     }
 
-    fun setAndConsumeImageLoader(imageLoader: ImageLoader) {
+    fun setAndConsumeImageLoader(imageLoader: ImageLoader, immediate: Boolean = false) {
         if (!surfaceCreated) {
             queuedNextImageLoader = imageLoader
             return
         }
 
-        if (crossfadeAnimator.isRunning) {
+        if (crossfadeAnimator.isRunning && !immediate) {
             queuedNextImageLoader = imageLoader
             return
         }
@@ -266,9 +280,14 @@ class MuzeiBlurRenderer(
             return
         }
 
+        if (immediate) {
+            // Stop any running cross fade if we're immediately switching to this new image
+            crossfadeAnimator.finish()
+        }
+
         if (!demoMode && !preview) {
-            SwitchingPhotosLiveData.postValue(SwitchingPhotosInProgress(nextGLPictureSet.id))
-            ArtworkSizeLiveData.postValue(ArtworkSize(width, height))
+            SwitchingPhotosStateFlow.value = SwitchingPhotosInProgress(nextGLPictureSet.id)
+            ArtworkSizeStateFlow.value = ArtworkSize(width, height)
             ArtDetailViewport.setDefaultViewport(nextGLPictureSet.id,
                     width * 1f / height,
                     aspectRatio)
@@ -276,7 +295,7 @@ class MuzeiBlurRenderer(
 
         nextGLPictureSet.load(imageLoader)
 
-        crossfadeAnimator.start(0, 1) {
+        crossfadeAnimator.start(if (immediate) 1 else 0, 1) {
             // swap current and next picturesets
             val oldGLPictureSet = currentGLPictureSet
             currentGLPictureSet = nextGLPictureSet
@@ -284,27 +303,27 @@ class MuzeiBlurRenderer(
             callbacks.requestRender()
             oldGLPictureSet.destroyPictures()
             if (!demoMode) {
-                SwitchingPhotosLiveData.postValue(SwitchingPhotosDone(currentGLPictureSet.id))
+                SwitchingPhotosStateFlow.value = SwitchingPhotosDone(currentGLPictureSet.id)
             }
             System.gc()
             val loader = queuedNextImageLoader
             if (loader != null) {
                 queuedNextImageLoader = null
-                setAndConsumeImageLoader(loader)
+                setAndConsumeImageLoader(loader, immediate)
             }
         }
         callbacks.requestRender()
     }
 
-    private inner class GLPictureSet internal constructor(internal val id: Int) {
+    private inner class GLPictureSet(val id: Int) {
         private val projectionMatrix = FloatArray(16)
         private val mvpMatrix = FloatArray(16)
         private val pictures = arrayOfNulls<GLPicture>(blurKeyframes + 1)
         private var hasBitmap = false
         private var bitmapAspectRatio = 1f
-        internal var dimAmount = 0
+        var dimAmount = 0
 
-        internal fun load(imageLoader: ImageLoader) {
+        fun load(imageLoader: ImageLoader) {
             val (width, height) = imageLoader.getSize()
             hasBitmap = width != 0 && height != 0
             bitmapAspectRatio = if (hasBitmap)
@@ -323,7 +342,7 @@ class MuzeiBlurRenderer(
                 dimAmount = if (demoMode)
                     DEMO_DIM
                 else
-                    (maxDim * (1 - DIM_RANGE + DIM_RANGE * Math.sqrt(darkness.toDouble()))).toInt()
+                    (maxDim * (1 - DIM_RANGE + DIM_RANGE * sqrt(darkness.toDouble()))).toInt()
                 tempBitmap?.recycle()
 
                 // Create the GLPicture objects
@@ -338,7 +357,7 @@ class MuzeiBlurRenderer(
                                 attemptedHeight)
                         pictures[0] = image?.toGLPicture()
                         success = true
-                    } catch (e: OutOfMemoryError) {
+                    } catch (_: OutOfMemoryError) {
                         sampleSize = sampleSize shl 1
                         Log.d(TAG, "Decoding image at ${attemptedWidth}x$attemptedHeight " +
                                 "was too large, trying a sample size of $sampleSize")
@@ -356,8 +375,8 @@ class MuzeiBlurRenderer(
                     }
                     // Note that image width should be a multiple of 4 to avoid
                     // issues with RenderScript allocations.
-                    val scaledHeight = Math.max(2, sampleSizeTargetHeight.floorEven())
-                    val scaledWidth = Math.max(4, (scaledHeight * bitmapAspectRatio).toInt().roundMult4())
+                    val scaledHeight = max(2, sampleSizeTargetHeight.floorEven())
+                    val scaledWidth = max(4, (scaledHeight * bitmapAspectRatio).toInt().roundMult4())
 
                     // To blur, first load the entire bitmap region, but at a very large
                     // sample size that's appropriate for the final blurred image
@@ -372,8 +391,7 @@ class MuzeiBlurRenderer(
 
                         // Note that image width should be a multiple of 4 to avoid
                         // issues with RenderScript allocations.
-                        val scaledBitmap = Bitmap.createScaledBitmap(
-                                tempBitmap, scaledWidth, scaledHeight, true)
+                        val scaledBitmap = tempBitmap.scale(scaledWidth, scaledHeight)
                         if (tempBitmap != scaledBitmap) {
                             tempBitmap.recycle()
                         }
@@ -407,21 +425,23 @@ class MuzeiBlurRenderer(
             callbacks.requestRender()
         }
 
-        internal fun recomputeTransformMatrices() {
+        fun recomputeTransformMatrices() {
             val screenToBitmapAspectRatio = aspectRatio / bitmapAspectRatio
             if (screenToBitmapAspectRatio == 0f) {
                 return
             }
 
             // Ensure the bitmap is as wide as the screen by applying zoom if necessary
-            val zoom = Math.max(1f, screenToBitmapAspectRatio)
+            // ignoring any system wide zoom requests while the Art Detail screen is open
+            val zoom = max(1f, screenToBitmapAspectRatio) *
+                    (if (ArtDetailOpen.value) 1f else zoomAmount)
 
             // Total scale factors in both zoom and scale due to aspect ratio.
             val scaledBitmapToScreenAspectRatio = zoom / screenToBitmapAspectRatio
 
             // At most pan across 1.8 screenfuls (2 screenfuls + some parallax)
             // TODO: if we know the number of home screen pages, use that number here
-            val maxPanScreenWidths = Math.min(1.8f, scaledBitmapToScreenAspectRatio)
+            val maxPanScreenWidths = min(1.8f, scaledBitmapToScreenAspectRatio)
 
             currentViewport.apply {
                 left = interpolate(-1f, 1f,
@@ -475,7 +495,7 @@ class MuzeiBlurRenderer(
                     1f, 10f)
         }
 
-        internal fun drawFrame(globalAlpha: Float) {
+        fun drawFrame(globalAlpha: Float) {
             if (!hasBitmap) {
                 return
             }
@@ -484,8 +504,8 @@ class MuzeiBlurRenderer(
             Matrix.multiplyMM(mvpMatrix, 0, projectionMatrix, 0, mvpMatrix, 0)
 
             val blurFrame = blurAnimator.currentValue
-            val lo = Math.floor(blurFrame.toDouble()).toInt()
-            val hi = Math.ceil(blurFrame.toDouble()).toInt()
+            val lo = floor(blurFrame.toDouble()).toInt()
+            val hi = ceil(blurFrame.toDouble()).toInt()
 
             val localHiAlpha = blurFrame - lo
             when {
@@ -529,7 +549,7 @@ class MuzeiBlurRenderer(
             }
         }
 
-        internal fun destroyPictures() {
+        fun destroyPictures() {
             for (i in pictures.indices) {
                 if (pictures[i] != null) {
                     pictures[i]?.destroy()
@@ -561,7 +581,7 @@ class MuzeiBlurRenderer(
         callbacks.requestRender()
     }
 
-    interface Callbacks {
+    fun interface Callbacks {
         fun requestRender()
     }
 }

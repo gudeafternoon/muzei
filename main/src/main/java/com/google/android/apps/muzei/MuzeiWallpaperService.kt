@@ -23,7 +23,6 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.graphics.Bitmap
 import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
@@ -32,14 +31,14 @@ import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.ViewConfiguration
 import androidx.annotation.RequiresApi
+import androidx.core.content.ContextCompat
 import androidx.core.os.UserManagerCompat
-import androidx.core.os.bundleOf
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
-import androidx.lifecycle.MutableLiveData
-import androidx.lifecycle.observe
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import com.google.android.apps.muzei.featuredart.BuildConfig.FEATURED_ART_AUTHORITY
 import com.google.android.apps.muzei.notifications.NotificationUpdater
 import com.google.android.apps.muzei.render.ImageLoader
@@ -48,28 +47,35 @@ import com.google.android.apps.muzei.render.RealRenderController
 import com.google.android.apps.muzei.render.RenderController
 import com.google.android.apps.muzei.room.Artwork
 import com.google.android.apps.muzei.room.MuzeiDatabase
+import com.google.android.apps.muzei.room.contentUri
 import com.google.android.apps.muzei.room.openArtworkInfo
-import com.google.android.apps.muzei.settings.EffectsLockScreenOpenLiveData
+import com.google.android.apps.muzei.settings.EffectsLockScreenOpen
 import com.google.android.apps.muzei.settings.Prefs
 import com.google.android.apps.muzei.shortcuts.ArtworkInfoShortcutController
-import com.google.android.apps.muzei.sources.SourceManager
 import com.google.android.apps.muzei.sync.ProviderManager
-import com.google.android.apps.muzei.util.coroutineScope
-import com.google.android.apps.muzei.util.observeNonNull
+import com.google.android.apps.muzei.util.collectIn
 import com.google.android.apps.muzei.wallpaper.LockscreenObserver
 import com.google.android.apps.muzei.wallpaper.WallpaperAnalytics
 import com.google.android.apps.muzei.wearable.WearableController
 import com.google.android.apps.muzei.widget.WidgetUpdater
+import com.google.firebase.Firebase
 import com.google.firebase.analytics.FirebaseAnalytics
-import kotlinx.coroutines.GlobalScope
+import com.google.firebase.analytics.analytics
+import com.google.firebase.analytics.logEvent
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import net.rbgrn.android.glwallpaperservice.GLWallpaperService
 
 data class WallpaperSize(val width: Int, val height: Int)
 
-object WallpaperSizeLiveData : MutableLiveData<WallpaperSize>()
+val WallpaperSizeStateFlow = MutableStateFlow<WallpaperSize?>(null)
 
 class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
 
@@ -86,20 +92,24 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
         return MuzeiWallpaperEngine()
     }
 
-    @SuppressLint("InlinedApi")
+    @SuppressLint("InlinedApi", "WrongConstant")
     override fun onCreate() {
         super.onCreate()
-        wallpaperLifecycle.addObserver(SourceManager(this))
-        wallpaperLifecycle.addObserver(NotificationUpdater(this))
-        wallpaperLifecycle.addObserver(WearableController(this))
-        wallpaperLifecycle.addObserver(WidgetUpdater(this))
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N_MR1) {
-            wallpaperLifecycle.addObserver(ArtworkInfoShortcutController(this, this))
+        with(wallpaperLifecycle) {
+            addObserver(WorkManagerInitializer.initializeObserver(this@MuzeiWallpaperService))
+            addObserver(NotificationUpdater(this@MuzeiWallpaperService))
+            addObserver(WearableController(this@MuzeiWallpaperService))
+            addObserver(WidgetUpdater(this@MuzeiWallpaperService))
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N_MR1) {
+                addObserver(ArtworkInfoShortcutController(this@MuzeiWallpaperService))
+            }
         }
         ProviderManager.getInstance(this).observe(this) { provider ->
             if (provider == null) {
-                GlobalScope.launch {
-                    ProviderManager.select(this@MuzeiWallpaperService, FEATURED_ART_AUTHORITY)
+                lifecycleScope.launch {
+                    withContext(NonCancellable) {
+                        ProviderManager.select(this@MuzeiWallpaperService, FEATURED_ART_AUTHORITY)
+                    }
                 }
             }
         }
@@ -114,13 +124,16 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
                 }
             }
             val filter = IntentFilter(Intent.ACTION_USER_UNLOCKED)
-            registerReceiver(unlockReceiver, filter)
+            ContextCompat.registerReceiver(
+                this,
+                unlockReceiver,
+                filter,
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
         }
     }
 
-    override fun getLifecycle(): Lifecycle {
-        return wallpaperLifecycle
-    }
+    override val lifecycle: Lifecycle = wallpaperLifecycle
 
     override fun onDestroy() {
         if (unlockReceiver != null) {
@@ -131,16 +144,15 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
     }
 
     inner class MuzeiWallpaperEngine
-        : GLWallpaperService.GLEngine(),
+        : GLEngine(),
             LifecycleOwner,
             DefaultLifecycleObserver,
             RenderController.Callbacks,
-            MuzeiBlurRenderer.Callbacks,
-            (Boolean) -> Unit {
+            MuzeiBlurRenderer.Callbacks {
 
         private lateinit var renderer: MuzeiBlurRenderer
         private lateinit var renderController: RenderController
-        private var currentArtwork: Bitmap? = null
+        private var currentArtworkColors: WallpaperColors? = null
 
         private var validDoubleTap: Boolean = false
         private var lastThreeFingerTap = 0L
@@ -155,7 +167,7 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
             }
 
             override fun onDoubleTap(e: MotionEvent): Boolean {
-                if (ArtDetailOpenLiveData.value == true) {
+                if (ArtDetailOpen.value) {
                     // The main activity is visible, so discard any double touches since focus
                     // should be forced on
                     return true
@@ -165,7 +177,7 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
 
                 doubleTapTimeout?.cancel()
                 val timeout = ViewConfiguration.getDoubleTapTimeout().toLong()
-                doubleTapTimeout = coroutineScope.launch {
+                doubleTapTimeout = lifecycleScope.launch {
                     delay(timeout)
                     queueEvent {
                         validDoubleTap = false
@@ -197,32 +209,36 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
             engineLifecycle.addObserver(WallpaperAnalytics(this@MuzeiWallpaperService))
             engineLifecycle.addObserver(LockscreenObserver(this@MuzeiWallpaperService, this))
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-                MuzeiDatabase.getInstance(this@MuzeiWallpaperService)
-                        .artworkDao().currentArtwork
-                        .observeNonNull(this) { artwork ->
-                            coroutineScope.launch {
+                lifecycleScope.launch {
+                    repeatOnLifecycle(Lifecycle.State.STARTED) {
+                        val database = MuzeiDatabase.getInstance(this@MuzeiWallpaperService)
+                        database.artworkDao().getCurrentArtworkFlow()
+                            .filterNotNull().collectLatest { artwork ->
                                 updateCurrentArtwork(artwork)
                             }
-                        }
+                    }
+                }
+
             }
 
             // Use the MuzeiWallpaperService's lifecycle to wait for the user to unlock
             wallpaperLifecycle.addObserver(this)
             setTouchEventsEnabled(true)
             setOffsetNotificationsEnabled(true)
-            EffectsLockScreenOpenLiveData.observe(this) { isEffectsLockScreenOpen ->
+            EffectsLockScreenOpen.collectIn(this) { isEffectsLockScreenOpen ->
                 renderController.onLockScreen = isEffectsLockScreenOpen
             }
-            ArtDetailOpenLiveData.observe(this) { isArtDetailOpened ->
+            ArtDetailOpen.collectIn(this) { isArtDetailOpened ->
                 cancelDelayedBlur()
                 queueEvent { renderer.setIsBlurred(!isArtDetailOpened, true) }
             }
-            ArtDetailViewport.addObserver(this)
+
+            ArtDetailViewport.getChanges().collectIn(this) {
+                requestRender()
+            }
         }
 
-        override fun getLifecycle(): Lifecycle {
-            return engineLifecycle
-        }
+        override val lifecycle: Lifecycle = engineLifecycle
 
         override fun onStart(owner: LifecycleOwner) {
             // The MuzeiWallpaperService only gets to ON_START when the user is unlocked
@@ -234,31 +250,29 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
 
         @RequiresApi(Build.VERSION_CODES.O_MR1)
         private suspend fun updateCurrentArtwork(artwork: Artwork) {
-            currentArtwork = ImageLoader.decode(
+            val image = ImageLoader.decode(
                     contentResolver, artwork.contentUri,
                     MAX_ARTWORK_SIZE / 2) ?: return
+            currentArtworkColors = withContext(Dispatchers.IO) {
+                WallpaperColors.fromBitmap(image)
+            }
             notifyColorsChanged()
         }
 
         @RequiresApi(Build.VERSION_CODES.O_MR1)
         override fun onComputeColors(): WallpaperColors? =
-                currentArtwork?.run {
-                    WallpaperColors.fromBitmap(this)
-                } ?: super.onComputeColors()
+            currentArtworkColors ?: super.onComputeColors()
 
         override fun onSurfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
             super.onSurfaceChanged(holder, format, width, height)
             if (!isPreview) {
-                WallpaperSizeLiveData.value = WallpaperSize(width, height)
+                WallpaperSizeStateFlow.value = WallpaperSize(width, height)
             }
             renderController.reloadCurrentArtwork()
         }
 
         override fun onDestroy() {
-            ArtDetailViewport.removeObserver(this)
-            if (!isPreview) {
-                lifecycle.removeObserver(this)
-            }
+            wallpaperLifecycle.removeObserver(this)
             engineLifecycle.handleLifecycleEvent(Lifecycle.Event.ON_DESTROY)
             queueEvent {
                 renderer.destroy()
@@ -266,12 +280,8 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
             super<GLEngine>.onDestroy()
         }
 
-        override fun invoke(isFromUser: Boolean) {
-            requestRender()
-        }
-
         fun lockScreenVisibleChanged(isLockScreenVisible: Boolean) {
-            if (EffectsLockScreenOpenLiveData.value != true) {
+            if (!EffectsLockScreenOpen.value) {
                 renderController.onLockScreen = isLockScreenVisible
             }
         }
@@ -291,6 +301,11 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
             super.onOffsetsChanged(xOffset, yOffset, xOffsetStep, yOffsetStep, xPixelOffset,
                     yPixelOffset)
             renderer.setNormalOffsetX(xOffset)
+        }
+
+        override fun onZoomChanged(zoom: Float) {
+            super.onZoomChanged(zoom)
+            renderer.setZoom(zoom)
         }
 
         override fun onCommand(
@@ -316,9 +331,9 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
         private fun triggerTapAction(action: String, type: String) {
             when (action) {
                 Prefs.PREF_TAP_ACTION_TEMP -> {
-                    FirebaseAnalytics.getInstance(this@MuzeiWallpaperService).logEvent(
-                            "temp_disable_effects", bundleOf(
-                            FirebaseAnalytics.Param.CONTENT_TYPE to type))
+                    Firebase.analytics.logEvent("temp_disable_effects") {
+                        param(FirebaseAnalytics.Param.CONTENT_TYPE, type)
+                    }
                     // Temporarily toggle focused/blurred
                     queueEvent {
                         renderer.setIsBlurred(!renderer.isBlurred, false)
@@ -327,24 +342,28 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
                     }
                 }
                 Prefs.PREF_TAP_ACTION_NEXT -> {
-                    GlobalScope.launch {
-                        FirebaseAnalytics.getInstance(this@MuzeiWallpaperService).logEvent(
-                                "next_artwork", bundleOf(
-                                FirebaseAnalytics.Param.CONTENT_TYPE to type))
-                        SourceManager.nextArtwork(this@MuzeiWallpaperService)
+                    lifecycleScope.launch {
+                        withContext(NonCancellable) {
+                            Firebase.analytics.logEvent("next_artwork") {
+                                param(FirebaseAnalytics.Param.CONTENT_TYPE, type)
+                            }
+                            ProviderManager.getInstance(this@MuzeiWallpaperService).nextArtwork()
+                        }
                     }
                 }
                 Prefs.PREF_TAP_ACTION_VIEW_DETAILS -> {
-                    GlobalScope.launch {
-                        val artwork = MuzeiDatabase
+                    lifecycleScope.launch {
+                        withContext(NonCancellable) {
+                            val artwork = MuzeiDatabase
                                 .getInstance(this@MuzeiWallpaperService)
                                 .artworkDao()
                                 .getCurrentArtwork()
-                        artwork?.run {
-                            FirebaseAnalytics.getInstance(this@MuzeiWallpaperService).logEvent(
-                                    "artwork_info_open", bundleOf(
-                                    FirebaseAnalytics.Param.CONTENT_TYPE to type))
-                            openArtworkInfo(this@MuzeiWallpaperService)
+                            artwork?.run {
+                                Firebase.analytics.logEvent("artwork_info_open") {
+                                    param(FirebaseAnalytics.Param.CONTENT_TYPE, type)
+                                }
+                                openArtworkInfo(this@MuzeiWallpaperService)
+                            }
                         }
                     }
                 }
@@ -375,15 +394,15 @@ class MuzeiWallpaperService : GLWallpaperService(), LifecycleOwner {
         }
 
         private fun delayedBlur() {
-            if (ArtDetailOpenLiveData.value == true || renderer.isBlurred) {
+            if (ArtDetailOpen.value || renderer.isBlurred) {
                 return
             }
 
             cancelDelayedBlur()
-            delayedBlur = coroutineScope.launch {
+            delayedBlur = lifecycleScope.launch {
                 delay(TEMPORARY_FOCUS_DURATION_MILLIS)
                 queueEvent {
-                    renderer.setIsBlurred(true, false)
+                    renderer.setIsBlurred(isBlurred = true, artDetailMode = false)
                 }
             }
         }

@@ -19,13 +19,19 @@ package com.google.android.apps.muzei.render
 import android.content.Context
 import android.content.SharedPreferences
 import android.os.Handler
+import android.os.Looper
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.lifecycleScope
 import com.google.android.apps.muzei.settings.Prefs
-import com.google.android.apps.muzei.util.coroutineScope
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+
+sealed class ReloadType
+data object ReloadWhenVisible : ReloadType()
+data object ReloadDespiteInvisible : ReloadType()
+data object ReloadImmediate : ReloadType()
 
 abstract class RenderController(
         protected var context: Context,
@@ -57,7 +63,8 @@ abstract class RenderController(
                         if (value) Prefs.PREF_LOCK_DIM_AMOUNT else Prefs.PREF_DIM_AMOUNT)
                 renderer.recomputeGreyAmount(
                         if (value) Prefs.PREF_LOCK_GREY_AMOUNT else Prefs.PREF_GREY_AMOUNT)
-                reloadCurrentArtwork()
+                // Switch immediately if we're transitioning to the lock screen
+                reloadCurrentArtwork(if (value) ReloadImmediate else ReloadDespiteInvisible)
             }
         }
     private lateinit var coroutineScope: CoroutineScope
@@ -98,14 +105,14 @@ abstract class RenderController(
     }
 
     private val throttledForceReloadHandler by lazy {
-        Handler(Handler.Callback {
+        Handler(Looper.getMainLooper()) {
             reloadCurrentArtwork()
             true
-        })
+        }
     }
 
     override fun onCreate(owner: LifecycleOwner) {
-        coroutineScope = owner.coroutineScope
+        coroutineScope = owner.lifecycleScope
         Prefs.getSharedPreferences(context)
                 .registerOnSharedPreferenceChangeListener(sharedPreferenceChangeListener)
     }
@@ -124,7 +131,7 @@ abstract class RenderController(
 
     protected abstract suspend fun openDownloadedCurrentArtwork(): ImageLoader
 
-    fun reloadCurrentArtwork() {
+    fun reloadCurrentArtwork(reloadType: ReloadType = ReloadWhenVisible) {
         if (destroyed) {
             // Don't reload artwork for destroyed RenderControllers
             return
@@ -133,8 +140,9 @@ abstract class RenderController(
             val imageLoader = openDownloadedCurrentArtwork()
 
             callbacks.queueEventOnGlThread {
-                if (visible) {
-                    renderer.setAndConsumeImageLoader(imageLoader)
+                if (visible || reloadType != ReloadWhenVisible) {
+                    renderer.setAndConsumeImageLoader(imageLoader,
+                    reloadType == ReloadImmediate || !visible)
                 } else {
                     queuedImageLoader = imageLoader
                 }

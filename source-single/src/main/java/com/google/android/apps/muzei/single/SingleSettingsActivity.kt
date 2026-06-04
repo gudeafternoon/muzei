@@ -16,49 +16,47 @@
 
 package com.google.android.apps.muzei.single
 
-import android.app.Activity
-import android.content.Intent
 import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts.GetContent
+import androidx.activity.result.launch
+import androidx.activity.result.registerForActivityResult
+import androidx.lifecycle.lifecycleScope
 import com.google.android.apps.muzei.util.toast
-import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Settings Activity which allows users to select a new photo
  */
-class SingleSettingsActivity : Activity() {
+class SingleSettingsActivity : ComponentActivity() {
 
-    companion object {
-        private const val REQUEST_PHOTO = 1
-    }
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        val intent = Intent(Intent.ACTION_GET_CONTENT).apply {
-            type = "image/*"
-            addCategory(Intent.CATEGORY_OPENABLE)
-        }
-        if (intent.resolveActivity(packageManager) != null) {
-            startActivityForResult(intent, REQUEST_PHOTO)
+    private val getImage = registerForActivityResult(GetContent(), "image/*") { uri ->
+        if (uri != null) {
+            lifecycleScope.launch {
+                withContext(NonCancellable) {
+                    val success = SingleArtProvider.setArtwork(
+                        this@SingleSettingsActivity, uri
+                    )
+                    setResult(if (success) RESULT_OK else RESULT_CANCELED)
+                    finish()
+                }
+            }
         } else {
-            toast(R.string.single_get_content_failure)
+            setResult(RESULT_CANCELED)
             finish()
         }
     }
 
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        data?.data?.takeIf {
-            requestCode == REQUEST_PHOTO && resultCode == RESULT_OK
-        }?.also { uri ->
-            GlobalScope.launch {
-                val success = SingleArtProvider.setArtwork(
-                        this@SingleSettingsActivity, uri)
-                setResult(if (success) Activity.RESULT_OK else Activity.RESULT_CANCELED)
-                finish()
-            }
-        } ?: run {
-            setResult(RESULT_CANCELED)
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        try {
+            getImage.launch()
+        } catch (_: Exception) {
+            toast(R.string.single_get_content_failure)
             finish()
         }
     }

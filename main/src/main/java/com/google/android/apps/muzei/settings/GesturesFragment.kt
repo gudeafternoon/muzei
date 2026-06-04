@@ -16,97 +16,89 @@
 
 package com.google.android.apps.muzei.settings
 
-import android.graphics.Color
-import android.os.Build
 import android.os.Bundle
 import android.view.LayoutInflater
-import android.view.View
 import android.view.ViewGroup
-import android.widget.RadioGroup
-import androidx.appcompat.graphics.drawable.DrawerArrowDrawable
-import androidx.appcompat.widget.Toolbar
-import androidx.core.content.ContextCompat
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.core.content.edit
-import androidx.core.view.ViewCompat
 import androidx.fragment.app.Fragment
+import androidx.fragment.compose.content
 import androidx.navigation.fragment.findNavController
+import com.google.android.apps.muzei.theme.AppTheme
 import net.nurik.roman.muzei.R
 
-class GesturesFragment: Fragment() {
+class GesturesFragment : Fragment() {
     override fun onCreateView(
-            inflater: LayoutInflater,
-            container: ViewGroup?,
-            savedInstanceState: Bundle?
-    ): View? {
-        return inflater.inflate(R.layout.gestures_fragment, container, false)
-    }
-
-    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-        // Ensure we have the latest insets
-        ViewCompat.requestApplyInsets(view)
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            requireActivity().window.statusBarColor = ContextCompat.getColor(
-                    requireContext(), R.color.theme_primary_dark)
-        }
-
-        view.findViewById<Toolbar>(R.id.gestures_toolbar).apply {
-            navigationIcon = DrawerArrowDrawable(requireContext()).apply {
-                progress = 1f
+        inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?
+    ) = content {
+        AppTheme(
+            dynamicColor = false
+        ) {
+            val context = LocalContext.current
+            val prefs = remember { Prefs.getSharedPreferences(context) }
+            val gestureOptions = listOf(
+                stringResource(R.string.gestures_tap_action_temporary_disable),
+                stringResource(R.string.gestures_tap_action_next),
+                stringResource(R.string.gestures_tap_action_view_details),
+                stringResource(R.string.gestures_tap_action_none),
+            )
+            val prefToStringMapper: (prefValue: String?) -> String = { prefValue ->
+                when (prefValue) {
+                    Prefs.PREF_TAP_ACTION_TEMP -> gestureOptions[0]
+                    Prefs.PREF_TAP_ACTION_NEXT -> gestureOptions[1]
+                    Prefs.PREF_TAP_ACTION_VIEW_DETAILS -> gestureOptions[2]
+                    else -> gestureOptions[3]
+                }
             }
-            setNavigationOnClickListener {
-                findNavController().popBackStack()
+            val stringToPrefMapper: (string: String) -> String = { string ->
+                when (string) {
+                    gestureOptions[0] -> Prefs.PREF_TAP_ACTION_TEMP
+                    gestureOptions[1] -> Prefs.PREF_TAP_ACTION_NEXT
+                    gestureOptions[2] -> Prefs.PREF_TAP_ACTION_VIEW_DETAILS
+                    else -> Prefs.PREF_TAP_ACTION_NONE
+                }
             }
-        }
-
-        val prefs = Prefs.getSharedPreferences(requireContext())
-        val doubleTap = view.findViewById<RadioGroup>(R.id.gestures_double_tap_action)
-        val doubleTapValue = prefs.getString(Prefs.PREF_DOUBLE_TAP,
-                Prefs.PREF_TAP_ACTION_TEMP)
-        doubleTap.check(when (doubleTapValue) {
-            Prefs.PREF_TAP_ACTION_TEMP -> R.id.gestures_double_tap_temporary_disable
-            Prefs.PREF_TAP_ACTION_NEXT -> R.id.gestures_double_tap_next
-            Prefs.PREF_TAP_ACTION_VIEW_DETAILS -> R.id.gestures_double_tap_view_details
-            else -> R.id.gestures_double_tap_none
-        })
-        doubleTap.setOnCheckedChangeListener { _, index ->
-            val newValue = when(index) {
-                R.id.gestures_double_tap_temporary_disable -> Prefs.PREF_TAP_ACTION_TEMP
-                R.id.gestures_double_tap_next -> Prefs.PREF_TAP_ACTION_NEXT
-                R.id.gestures_double_tap_view_details -> Prefs.PREF_TAP_ACTION_VIEW_DETAILS
-                else -> Prefs.PREF_TAP_ACTION_NONE
+            val defaultDoubleTapOption = remember {
+                val doubleTapValue = prefs.getString(
+                    Prefs.PREF_DOUBLE_TAP, Prefs.PREF_TAP_ACTION_TEMP
+                )
+                prefToStringMapper(doubleTapValue)
             }
-            prefs.edit {
-                putString(Prefs.PREF_DOUBLE_TAP, newValue)
+            var doubleTapSelectedOption by remember { mutableStateOf(defaultDoubleTapOption) }
+            val defaultThreeFingerOption = remember {
+                val threeFingerValue = prefs.getString(
+                    Prefs.PREF_THREE_FINGER_TAP, Prefs.PREF_TAP_ACTION_NONE
+                )
+                prefToStringMapper(threeFingerValue)
             }
-        }
-
-        val threeFingerTap = view.findViewById<RadioGroup>(R.id.gestures_three_finger_tap_action)
-        val threeFingerTapValue = prefs.getString(Prefs.PREF_THREE_FINGER_TAP,
-                Prefs.PREF_TAP_ACTION_NONE)
-        threeFingerTap.check(when (threeFingerTapValue) {
-            Prefs.PREF_TAP_ACTION_TEMP -> R.id.gestures_three_finger_tap_temporary_disable
-            Prefs.PREF_TAP_ACTION_NEXT -> R.id.gestures_three_finger_tap_next
-            Prefs.PREF_TAP_ACTION_VIEW_DETAILS -> R.id.gestures_three_finger_tap_view_details
-            else -> R.id.gestures_three_finger_tap_none
-        })
-        threeFingerTap.setOnCheckedChangeListener { _, index ->
-            val newValue = when(index) {
-                R.id.gestures_three_finger_tap_temporary_disable -> Prefs.PREF_TAP_ACTION_TEMP
-                R.id.gestures_three_finger_tap_next -> Prefs.PREF_TAP_ACTION_NEXT
-                R.id.gestures_three_finger_tap_view_details -> Prefs.PREF_TAP_ACTION_VIEW_DETAILS
-                else -> Prefs.PREF_TAP_ACTION_NONE
-            }
-            prefs.edit {
-                putString(Prefs.PREF_THREE_FINGER_TAP, newValue)
-            }
-        }
-    }
-
-    override fun onDestroyView() {
-        super.onDestroyView()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            requireActivity().window.statusBarColor = Color.TRANSPARENT
+            var threeFingerSelectedOption by remember { mutableStateOf(defaultThreeFingerOption) }
+            GestureSettings(
+                doubleTapSelectedOption = doubleTapSelectedOption,
+                onDoubleTapSelectedOptionChange = { selectedOption ->
+                    prefs.edit {
+                        putString(Prefs.PREF_DOUBLE_TAP, stringToPrefMapper(selectedOption))
+                    }
+                    doubleTapSelectedOption = selectedOption
+                },
+                threeFingerSelectedOption = threeFingerSelectedOption,
+                onThreeFingerSelectedOptionChange = { selectedOption ->
+                    prefs.edit {
+                        putString(Prefs.PREF_THREE_FINGER_TAP, stringToPrefMapper(selectedOption))
+                    }
+                    threeFingerSelectedOption = selectedOption
+                },
+                onUp = {
+                    val navController = findNavController()
+                    if (navController.currentDestination?.id == R.id.gestures_fragment) {
+                        navController.popBackStack()
+                    }
+                }
+            )
         }
     }
 }
